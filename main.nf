@@ -1,5 +1,9 @@
 #!/usr/bin/env nextflow
 
+// TODO
+// 3. test fq generate process
+// 4. exon/cds bed generate
+
 def helpMessage() {
     log.info """
 
@@ -9,16 +13,14 @@ def helpMessage() {
     nextflow run omReseq-nf --reads '*_R{1,2}.fastq.gz'
     =======================================================
 
-    Test arguments:
-      --test                        The project is for test, default is false
-      --test_data_size              Test data size, default is 100000
-      --test_data_dir               Test data directory
-
     References If not specified in the configuration file or you wish to overwrite any of the references.
       --fasta                       Path to Fasta reference
+      --bwa_index                   Path to reference bwa index
+      --exon_bed                    Path to reference exon bed file
+      --cds_bed                     Path to reference cds bed file
 
     Mandatory arguments:
-      --reads_dir                   Path to input data (must be surrounded with quotes)
+      --reads                       Path to input data (must be surrounded with quotes)
 
     Other options:
       --outdir                      The output directory where the results will be saved
@@ -39,55 +41,33 @@ if (params.help){
 
 
 // default parameters
-resds_pattern = '*.R{1,2}.clean.fastq.gz'
-// resds_pattern = '*_{1,2}.fq'
-params.skip_qc = false
+params.skip_qc = true
 params.skip_fastqc = false
-params.test = true
-params.test_data_size = 1000 * 1000
-params.test_data_dir = false
 params.fasta = false
+params.bwa_index = false
+params.reads = false
+params.cds_bed = false
+params.exon_bed = false
+
+// reference files
+cds_bed_file = file(params.cds_bed)
+exon_bed_file = file(params.exon_bed)
+bwa_index_file = file(params.bwa_index)
+genome_fa = file(params.fasta)
+
 
 // Prepare analysis fastq files
 Channel
-    .fromFilePairs("${params.reads_dir}/${resds_pattern}")
+    .fromFilePairs("${params.reads}")
     .ifEmpty { exit 1, "Cannot find any reads matching: ${resds_pattern} in ${params.reads_dir}!" }
-    .into { raw_reads }
-
-
-process fetch_fastq {
-    tag "Fetch fq on $name"
-
-    publishDir "${params.outdir}/fq_dir"
-
-    input:
-    set name, file(reads) from raw_reads
-
-    output:
-    file "*fq.gz" into fastqc_fq_files, bwa_fq_files
-
-    script:
-    if (params.test) {
-        """
-        seqtk sample -s100 ${reads[0]} ${params.test_data_size} | gzip > ${name}.R1.fq.gz
-        seqtk sample -s100 ${reads[1]} ${params.test_data_size} | gzip > ${name}.R2.fq.gz
-        """
-    } else {
-        """
-        ln -s ${reads[0]} ${name}.R1.fq.gz
-        ln -s ${reads[1]} ${name}.R2.fq.gz
-        """
-    }
-
-}
-
-
+    .into { fastqc_fq_files;  bwa_fq_files }
 
 /*
  * STEP 0 - FastQC
  */
 process fastqc {
     tag "FASTQC on $name"
+    
     publishDir "${params.outdir}/fastqc", mode: 'copy',
         saveAs: {filename -> filename.indexOf(".zip") > 0 ? "zips/$filename" : "$filename"}
 
@@ -95,15 +75,14 @@ process fastqc {
     !params.skip_qc && !params.skip_fastqc
 
     input:
-    file reads from fastqc_fq_files
+    set name, file(reads) from fastqc_fq_files
 
     output:
     file "*_fastqc.{zip,html}" into fastqc_results
 
-    cpus = 8
+    cpus = 2
 
     script:
-    name = reads[0].toString() - ~/.R1.fq.gz$/
     """
     fastqc -q ${reads}
     """
@@ -116,26 +95,28 @@ process fastqc {
 
 process bwa_mapping {
     tag "BWA Mapping on ${sample_name}"
+
     publishDir "${params.outdir}/mapping/${sample_name}"
 
     input:
-    file reads from bwa_fq_files
+    set sample_name, file(reads) from bwa_fq_files
+    file bwa_index_file from bwa_index_file
+    file genome_fa from genome_fa
 
-    output:
+    output: 
     file "${sample_name}.sort.bam" into samtools_stats_bam, picard_bam
 
     cpus = 16
 
     script:    
-    sample_name = reads[0].toString() - ~/.R1.fq.gz$/
     """
     bwa mem -M -a \
-	    -R \"@RG\tID:${sample_name}\tSM:${sample_name}\tLB:${sample_name}\tPI:350\tPL:Illumina\tCN:TCuni\" \
+	    -R \"@RG\\tID:${sample_name}\\tSM:${sample_name}\\tLB:${sample_name}\\tPI:350\\tPL:Illumina\\tCN:TCuni\" \
 	    -t ${task.cpus} \
 	    -K 10000000 \
-	    ${params.fasta} \
+	    ${bwa_index_file}/${genome_fa.getName()} \
 	    ${reads[0]} \
-	    ${reads[0]} \
+	    ${reads[1]} \
 	    | \
 	samtools view -O bam \
 	    --threads ${task.cpus} \
@@ -144,5 +125,44 @@ process bwa_mapping {
     samtools sort -m 2400M --threads ${task.cpus} \
 	    -o ${sample_name}.sort.bam \
 	    ${sample_name}.bam
+    """
+}
+
+
+process reads_cov_stats {
+
+    tag "SAMTOOLS stats on ${sample_name}"
+
+    publishDir "${params.outdir}/mapping/${sample_name}"
+
+    input:
+    file samtools_stats_bam from samtools_stats_bam
+    file cds_bed_file from cds_bed_file
+    file exon_bed_file from exon_bed_file
+
+    output:
+    file "${sample_name}.*.stat" into reads_cov_results
+
+    cpus = 8
+
+    script:
+    sample_name = samtools_stats_bam.baseName - '.sort'
+    """
+    samtools stats \
+	    --threads ${task.cpus} \
+	    --target-regions  ${cds_bed_file} \
+	    ${samtools_stats_bam} \
+	    > ${sample_name}.cds.stat
+
+    samtools stats \
+	    --threads ${task.cpus} \
+	    --target-regions  ${exon_bed_file} \
+	    ${samtools_stats_bam} \
+	    > ${sample_name}.exon.stat
+
+    samtools stats \
+	    --threads 20 \
+	    ${samtools_stats_bam} \
+	    > ${sample_name}.genome.stat 
     """
 }
