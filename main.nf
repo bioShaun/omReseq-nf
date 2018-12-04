@@ -1,8 +1,8 @@
 #!/usr/bin/env nextflow
 
 // TODO
-// 3. test fq generate process
-// 4. exon/cds bed generate
+// No cds bed file?
+
 
 def helpMessage() {
     log.info """
@@ -18,6 +18,7 @@ def helpMessage() {
       --bwa_index                   Path to reference bwa index
       --exon_bed                    Path to reference exon bed file
       --cds_bed                     Path to reference cds bed file
+      --known_vcf                   Path to known vcf file
 
     Mandatory arguments:
       --reads                       Path to input data (must be surrounded with quotes)
@@ -48,13 +49,18 @@ params.bwa_index = false
 params.reads = false
 params.cds_bed = false
 params.exon_bed = false
+params.known_vcf = false
 
 // reference files
 cds_bed_file = file(params.cds_bed)
 exon_bed_file = file(params.exon_bed)
 bwa_index_file = file(params.bwa_index)
 genome_fa = file(params.fasta)
-
+genome_path = genome_fa.getParent()
+genome_fai = file("${params.fasta}.fai")
+genome_dict = file("${genome_path}/${genome_fa.baseName}.dict")
+known_vcf = file(params.known_vcf)
+known_vcf_index = file("${params.known_vcf}.tbi")
 
 // Prepare analysis fastq files
 Channel
@@ -63,7 +69,7 @@ Channel
     .into { fastqc_fq_files;  bwa_fq_files }
 
 /*
- * STEP 0 - FastQC
+ * FastQC
  */
 process fastqc {
     tag "FASTQC on $name"
@@ -92,7 +98,6 @@ process fastqc {
 /*
 * BWA Mapping
 */
-
 process bwa_mapping {
     tag "BWA Mapping on ${sample_name}"
 
@@ -104,7 +109,7 @@ process bwa_mapping {
     file genome_fa from genome_fa
 
     output: 
-    file "${sample_name}.sort.bam" into samtools_stats_bam, picard_bam
+    file "${sample_name}.sort.bam" into samtools_stats_bam, to_rmdup_bam
 
     cpus = 16
 
@@ -122,13 +127,18 @@ process bwa_mapping {
 	    --threads ${task.cpus} \
 	    -o ${sample_name}.bam
 	
+    samtools fixmate -m ${sample_name}.bam ${sample_name}.fixmate.bam
+
     samtools sort -m 2400M --threads ${task.cpus} \
 	    -o ${sample_name}.sort.bam \
-	    ${sample_name}.bam
+	    ${sample_name}.fixmate.bam
     """
 }
 
 
+/*
+* Reads coverage stats
+*/
 process reads_cov_stats {
 
     tag "SAMTOOLS stats on ${sample_name}"
@@ -161,8 +171,104 @@ process reads_cov_stats {
 	    > ${sample_name}.exon.stat
 
     samtools stats \
-	    --threads 20 \
+	    --threads ${task.cpus} \
 	    ${samtools_stats_bam} \
 	    > ${sample_name}.genome.stat 
+    """
+}
+
+
+/*
+* Reads mark duplication and recalibration
+*/
+
+process bam_remove_duplicate {
+    tag "REMOVE DUP on ${sample_name}"
+
+    publishDir "${params.outdir}/mapping/${sample_name}"
+
+    input:
+    file bam from to_rmdup_bam
+  
+    output:
+    file "${sample_name}.rmdup.bam" into br_rmdup_bam, bqsr_rmdup_bam
+  
+    cpus = 8
+
+    script:
+    sample_name = bam.baseName - '.sort'
+    """
+    samtools markdup -r -s \
+	    --threads ${task.cpus} \
+	    ${bam} \
+	    ${sample_name}.rmdup.bam
+    """
+}
+
+
+/*
+* bam BaseRecalibrator
+*/
+process bam_BaseRecalibrator {
+    tag "BaseRecalibrator on ${sample_name}"
+
+    publishDir "${params.outdir}/mapping/${sample_name}"
+
+    input:
+    file bam from br_rmdup_bam
+    file refer from genome_fa
+    file refer_fai from genome_fai
+    file refer_dict from genome_dict
+    file known_vcf from known_vcf
+    file known_vcf_index from known_vcf_index
+  
+    output:
+    file "${sample_name}.recal.table" into recal_table
+  
+    cpus = 8
+
+    script:
+    sample_name = bam.baseName - '.rmdup'
+    """
+    gatk BaseRecalibrator \
+        --reference ${refer} \
+        --input ${sample_name}.rmdup.bam \
+        --output ${sample_name}.recal.table \
+        --known-sites ${known_vcf}
+    """
+}
+
+/*
+* bam ApplyBQSR
+*/
+process bam_ApplyBQSR {
+    tag "ApplyBQSR on ${sample_name}"
+
+    publishDir "${params.outdir}/mapping/${sample_name}"
+
+    input:
+    file bam from bqsr_rmdup_bam
+    file recal_table_file from recal_table
+    file refer from genome_fa
+    file refer_fai from genome_fai
+    file refer_dict from genome_dict
+  
+    output:
+    file "${sample_name}.bqsr.bam" into bqsr_bam
+  
+    cpus = 8
+
+    script:
+    sample_name = bam.baseName - '.rmdup'
+    """       
+    gatk ApplyBQSR \
+        --bqsr-recal-file ${recal_table_file} \
+        --input ${bam} \
+        --output ${sample_name}.bqsr.bam \
+        --read-filter AmbiguousBaseReadFilter \
+        --read-filter MappingQualityReadFilter \
+        --read-filter NonZeroReferenceLengthAlignmentReadFilter \
+        --read-filter ProperlyPairedReadFilter \
+        --minimum-mapping-quality 30 
     """
 }
