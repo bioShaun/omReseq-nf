@@ -18,6 +18,7 @@ def helpMessage() {
       --bwa_index                   Path to reference bwa index
       --exon_bed                    Path to reference exon bed file
       --cds_bed                     Path to reference cds bed file
+      --split_bed                   Path to split bed directory
       --known_vcf                   Path to known vcf file
 
     Mandatory arguments:
@@ -50,6 +51,7 @@ params.reads = false
 params.cds_bed = false
 params.exon_bed = false
 params.known_vcf = false
+params.split_bed = false
 
 // reference files
 cds_bed_file = file(params.cds_bed)
@@ -61,6 +63,7 @@ genome_fai = file("${params.fasta}.fai")
 genome_dict = file("${genome_path}/${genome_fa.baseName}.dict")
 known_vcf = file(params.known_vcf)
 known_vcf_index = file("${params.known_vcf}.tbi")
+split_bed_files = Channel.fromPath("${params.split_bed}/*bed")
 
 // Prepare analysis fastq files
 Channel
@@ -109,7 +112,7 @@ process bwa_mapping {
     file genome_fa from genome_fa
 
     output: 
-    file "${sample_name}.sort.bam" into samtools_stats_bam, to_rmdup_bam
+    file "${sample_name}.bam" into unsort_bam
 
     cpus = 16
 
@@ -126,8 +129,30 @@ process bwa_mapping {
 	samtools view -O bam \
 	    --threads ${task.cpus} \
 	    -o ${sample_name}.bam
-	
-    samtools fixmate -m ${sample_name}.bam ${sample_name}.fixmate.bam
+    """
+}
+
+
+/*
+* Sort bam
+*/
+process sort_bam {
+    tag "Sort Bam on ${sample_name}"
+
+    publishDir "${params.outdir}/mapping/${sample_name}"
+
+    input:
+    file bam from unsort_bam
+
+    output: 
+    file "${sample_name}.sort.bam" into samtools_stats_bam, to_rmdup_bam
+
+    cpus = 8
+
+    script:
+    sample_name = bam.baseName
+    """	
+    samtools fixmate -m ${bam} ${sample_name}.fixmate.bam
 
     samtools sort -m 2400M --threads ${task.cpus} \
 	    -o ${sample_name}.sort.bam \
@@ -135,13 +160,12 @@ process bwa_mapping {
     """
 }
 
-
 /*
 * Reads coverage stats
 */
 process reads_cov_stats {
 
-    tag "SAMTOOLS stats on ${sample_name}"
+    tag "SAMTOOLS Stats on ${sample_name}"
 
     publishDir "${params.outdir}/mapping/${sample_name}"
 
@@ -191,7 +215,7 @@ process bam_remove_duplicate {
     file bam from to_rmdup_bam
   
     output:
-    file "${sample_name}.rmdup.bam" into br_rmdup_bam, bqsr_rmdup_bam
+    file "${sample_name}.rmdup.bam" into br_rmdup_bam
   
     cpus = 8
 
@@ -224,6 +248,7 @@ process bam_BaseRecalibrator {
   
     output:
     file "${sample_name}.recal.table" into recal_table
+    file bam into bqsr_rmdup_bam
   
     cpus = 8
 
@@ -270,5 +295,39 @@ process bam_ApplyBQSR {
         --read-filter NonZeroReferenceLengthAlignmentReadFilter \
         --read-filter ProperlyPairedReadFilter \
         --minimum-mapping-quality 30 
+    """
+}
+
+/*
+*  GATK HaplotypeCaller
+*/
+
+process gatk_HaplotypeCaller {
+    tag "GATK HaplotypeCaller on ${sample_name} - ${chr_name}"
+
+    publishDir "${params.outdir}/gvcf/${sample_name}"
+
+    input:
+    file bam from bqsr_bam
+    each file(bed) from split_bed_files
+    file refer from genome_fa
+    file refer_fai from genome_fai
+    file refer_dict from genome_dict    
+
+    output:
+    file "${sample_name}.${chr_name}.hc.g.vcf.gz" into sample_gvcf
+    
+    cpus = 8
+
+    script:
+    sample_name = bam.baseName - '.bqsr'
+    chr_name = bed.baseName
+    """
+    gatk HaplotypeCaller  \
+        --input ${bam} \
+        --output ${sample_name}.${chr_name}.hc.g.vcf.gz \\
+        --reference ${refer} \\
+        --intervals ${bed} \\
+        --emit-ref-confidence GVCF
     """
 }
