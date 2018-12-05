@@ -9,10 +9,6 @@ def helpMessage() {
 
     Usage:
 
-    =======================================================
-    nextflow run omReseq-nf --reads '*_R{1,2}.fastq.gz'
-    =======================================================
-
     References If not specified in the configuration file or you wish to overwrite any of the references.
       --fasta                       Path to Fasta reference
       --bwa_index                   Path to reference bwa index
@@ -63,19 +59,25 @@ genome_fai = file("${params.fasta}.fai")
 genome_dict = file("${genome_path}/${genome_fa.baseName}.dict")
 known_vcf = file(params.known_vcf)
 known_vcf_index = file("${params.known_vcf}.tbi")
-split_bed_files = Channel.fromPath("${params.split_bed}/*bed")
+
+// prepare split bed files
+Channel
+    .fromPath("${params.split_bed}/*bed")
+    .ifEmpty { exit 1, "Cannot find any bed file in directory: ${params.split_bed}\n!" }
+    .into { haplotype_beds; combine_gvcf_beds }
+
 
 // Prepare analysis fastq files
 Channel
     .fromFilePairs("${params.reads}")
-    .ifEmpty { exit 1, "Cannot find any reads matching: ${resds_pattern} in ${params.reads_dir}!" }
+    .ifEmpty { exit 1, "Cannot find any reads matching: ${params.reads}\n!" }
     .into { fastqc_fq_files;  bwa_fq_files }
 
 /*
  * FastQC
  */
 process fastqc {
-    tag "FASTQC on $name"
+    tag "${name}"
     
     publishDir "${params.outdir}/fastqc", mode: 'copy',
         saveAs: {filename -> filename.indexOf(".zip") > 0 ? "zips/$filename" : "$filename"}
@@ -102,7 +104,7 @@ process fastqc {
 * BWA Mapping
 */
 process bwa_mapping {
-    tag "BWA Mapping on ${sample_name}"
+    tag "${sample_name}"
 
     publishDir "${params.outdir}/mapping/${sample_name}"
 
@@ -118,16 +120,16 @@ process bwa_mapping {
 
     script:    
     """
-    bwa mem -M -a \
-	    -R \"@RG\\tID:${sample_name}\\tSM:${sample_name}\\tLB:${sample_name}\\tPI:350\\tPL:Illumina\\tCN:TCuni\" \
-	    -t ${task.cpus} \
-	    -K 10000000 \
-	    ${bwa_index_file}/${genome_fa.getName()} \
-	    ${reads[0]} \
-	    ${reads[1]} \
-	    | \
-	samtools view -O bam \
-	    --threads ${task.cpus} \
+    bwa mem -M -a \\
+	    -R \"@RG\\tID:${sample_name}\\tSM:${sample_name}\\tLB:${sample_name}\\tPI:350\\tPL:Illumina\\tCN:TCuni\" \\
+	    -t ${task.cpus} \\
+	    -K 10000000 \\
+	    ${bwa_index_file}/${genome_fa.getName()} \\
+	    ${reads[0]} \\
+	    ${reads[1]} \\
+	    | \\
+	samtools view -O bam \\
+	    --threads ${task.cpus} \\
 	    -o ${sample_name}.bam
     """
 }
@@ -137,7 +139,7 @@ process bwa_mapping {
 * Sort bam
 */
 process sort_bam {
-    tag "Sort Bam on ${sample_name}"
+    tag "${sample_name}"
 
     publishDir "${params.outdir}/mapping/${sample_name}"
 
@@ -154,8 +156,8 @@ process sort_bam {
     """	
     samtools fixmate -m ${bam} ${sample_name}.fixmate.bam
 
-    samtools sort -m 2400M --threads ${task.cpus} \
-	    -o ${sample_name}.sort.bam \
+    samtools sort -m 2400M --threads ${task.cpus} \\
+	    -o ${sample_name}.sort.bam \\
 	    ${sample_name}.fixmate.bam
     """
 }
@@ -165,7 +167,7 @@ process sort_bam {
 */
 process reads_cov_stats {
 
-    tag "SAMTOOLS Stats on ${sample_name}"
+    tag "${sample_name}"
 
     publishDir "${params.outdir}/mapping/${sample_name}"
 
@@ -182,21 +184,21 @@ process reads_cov_stats {
     script:
     sample_name = samtools_stats_bam.baseName - '.sort'
     """
-    samtools stats \
-	    --threads ${task.cpus} \
-	    --target-regions  ${cds_bed_file} \
-	    ${samtools_stats_bam} \
+    samtools stats \\
+	    --threads ${task.cpus} \\
+	    --target-regions  ${cds_bed_file} \\
+	    ${samtools_stats_bam} \\
 	    > ${sample_name}.cds.stat
 
-    samtools stats \
-	    --threads ${task.cpus} \
-	    --target-regions  ${exon_bed_file} \
-	    ${samtools_stats_bam} \
+    samtools stats \\
+	    --threads ${task.cpus} \\
+	    --target-regions  ${exon_bed_file} \\
+	    ${samtools_stats_bam} \\
 	    > ${sample_name}.exon.stat
 
-    samtools stats \
-	    --threads ${task.cpus} \
-	    ${samtools_stats_bam} \
+    samtools stats \\
+	    --threads ${task.cpus} \\
+	    ${samtools_stats_bam} \\
 	    > ${sample_name}.genome.stat 
     """
 }
@@ -207,7 +209,7 @@ process reads_cov_stats {
 */
 
 process bam_remove_duplicate {
-    tag "REMOVE DUP on ${sample_name}"
+    tag "${sample_name}"
 
     publishDir "${params.outdir}/mapping/${sample_name}"
 
@@ -222,9 +224,9 @@ process bam_remove_duplicate {
     script:
     sample_name = bam.baseName - '.sort'
     """
-    samtools markdup -r -s \
-	    --threads ${task.cpus} \
-	    ${bam} \
+    samtools markdup -r -s \\
+	    --threads ${task.cpus} \\
+	    ${bam} \\
 	    ${sample_name}.rmdup.bam
     """
 }
@@ -234,7 +236,7 @@ process bam_remove_duplicate {
 * bam BaseRecalibrator
 */
 process bam_BaseRecalibrator {
-    tag "BaseRecalibrator on ${sample_name}"
+    tag "${sample_name}"
 
     publishDir "${params.outdir}/mapping/${sample_name}"
 
@@ -255,10 +257,10 @@ process bam_BaseRecalibrator {
     script:
     sample_name = bam.baseName - '.rmdup'
     """
-    gatk BaseRecalibrator \
-        --reference ${refer} \
-        --input ${sample_name}.rmdup.bam \
-        --output ${sample_name}.recal.table \
+    gatk BaseRecalibrator \\
+        --reference ${refer} \\
+        --input ${sample_name}.rmdup.bam \\
+        --output ${sample_name}.recal.table \\
         --known-sites ${known_vcf}
     """
 }
@@ -267,7 +269,7 @@ process bam_BaseRecalibrator {
 * bam ApplyBQSR
 */
 process bam_ApplyBQSR {
-    tag "ApplyBQSR on ${sample_name}"
+    tag "${sample_name}"
 
     publishDir "${params.outdir}/mapping/${sample_name}"
 
@@ -286,14 +288,14 @@ process bam_ApplyBQSR {
     script:
     sample_name = bam.baseName - '.rmdup'
     """       
-    gatk ApplyBQSR \
-        --bqsr-recal-file ${recal_table_file} \
-        --input ${bam} \
-        --output ${sample_name}.bqsr.bam \
-        --read-filter AmbiguousBaseReadFilter \
-        --read-filter MappingQualityReadFilter \
-        --read-filter NonZeroReferenceLengthAlignmentReadFilter \
-        --read-filter ProperlyPairedReadFilter \
+    gatk ApplyBQSR \\
+        --bqsr-recal-file ${recal_table_file} \\
+        --input ${bam} \\
+        --output ${sample_name}.bqsr.bam \\
+        --read-filter AmbiguousBaseReadFilter \\
+        --read-filter MappingQualityReadFilter \\
+        --read-filter NonZeroReferenceLengthAlignmentReadFilter \\
+        --read-filter ProperlyPairedReadFilter \\
         --minimum-mapping-quality 30 
     """
 }
@@ -303,19 +305,21 @@ process bam_ApplyBQSR {
 */
 
 process gatk_HaplotypeCaller {
-    tag "GATK HaplotypeCaller on ${sample_name} - ${chr_name}"
+    tag "${sample_name}|${chr_name}"
 
-    publishDir "${params.outdir}/gvcf/${sample_name}"
+    publishDir "${params.outdir}/gvcf/${sample_name}",
+        saveAs: {filename -> filename.indexOf("hc.g.vcf.gz.tbi") > 0 ? null : "$filename"} 
 
     input:
     file bam from bqsr_bam
-    each file(bed) from split_bed_files
+    each file(bed) from haplotype_beds
     file refer from genome_fa
     file refer_fai from genome_fai
     file refer_dict from genome_dict    
 
     output:
     file "${sample_name}.${chr_name}.hc.g.vcf.gz" into sample_gvcf
+    file "${sample_name}.${chr_name}.hc.g.vcf.gz.tbi" into sample_gvcf_index
     
     cpus = 8
 
@@ -323,11 +327,77 @@ process gatk_HaplotypeCaller {
     sample_name = bam.baseName - '.bqsr'
     chr_name = bed.baseName
     """
-    gatk HaplotypeCaller  \
-        --input ${bam} \
+    gatk HaplotypeCaller  \\
+        --input ${bam} \\
         --output ${sample_name}.${chr_name}.hc.g.vcf.gz \\
         --reference ${refer} \\
         --intervals ${bed} \\
         --emit-ref-confidence GVCF
+    """
+}
+
+/*
+* GATK CombineGVCFs
+*/
+
+process gatk_CombineGVCFs {
+    tag "Chrom: ${chr_name}"
+
+    publishDir "${params.outdir}/merge/gvcf",
+        saveAs: {filename -> filename.indexOf("g.vcf.gz.tbi") > 0 ? null : "$filename"} 
+
+    input:
+    file ('gvcf/*') from sample_gvcf.collect()
+    file ('gvcf/*') from sample_gvcf_index.collect()
+    each file(bed) from combine_gvcf_beds
+    file refer from genome_fa
+    file refer_fai from genome_fai
+    file refer_dict from genome_dict    
+    
+    output:
+    file "all_sample.${chr_name}.g.vcf.gz" into merged_sample_gvcf
+    file "all_sample.${chr_name}.g.vcf.gz.tbi" into merged_sample_gvcf_index
+    
+    script:
+    chr_name = bed.baseName
+    """
+    ls gvcf/*.${chr_name}.hc.g.vcf.gz > ${chr_name}.gvcf.list
+
+    gatk CombineGVCFs \\
+    	--output all_sample.${chr_name}.g.vcf.gz \\
+	    --reference ${refer} \\
+	    --variant ${chr_name}.gvcf.list
+    """
+}
+
+/*
+* GATK GenotypeGVCFs
+*/
+
+process gatk_GenotypeGVCFs {
+    tag "Chrom: ${chr_name}"
+
+    publishDir "${params.outdir}/merge/vcf",
+        saveAs: {filename -> filename.indexOf("vcf.gz.tbi") > 0 ? null : "$filename"} 
+
+    input:
+    file gvcf from merged_sample_gvcf
+    file gvcf_index from merged_sample_gvcf_index
+    file refer from genome_fa
+    file refer_fai from genome_fai
+    file refer_dict from genome_dict    
+    
+    output:
+    file "${vcf_prefix}.vcf.gz" into merged_sample_vcf
+    file "${vcf_prefix}.vcf.gz.tbi" into merged_sample_vcf_index
+    
+    script:
+    vcf_prefix = gvcf.baseName - '.g.vcf'
+    chr_name = vcf_prefix - 'all_sample.'
+    """
+    gatk GenotypeGVCFs \\
+        --reference ${refer} \\
+        --variant ${gvcf} \\
+        --output ${vcf_prefix}.vcf.gz
     """
 }
