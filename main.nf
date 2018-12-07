@@ -48,6 +48,13 @@ params.cds_bed = false
 params.exon_bed = false
 params.known_vcf = false
 params.split_bed = false
+// 30 for real data
+params.quality = 10
+// 5 for read data
+params.depth = 2
+// snpEff
+params.snpEff = '/public/software/snpEff/snpEffv4.3T/'
+params.snpEff_db = 'oryza_sativa'
 
 // reference files
 cds_bed_file = file(params.cds_bed)
@@ -207,7 +214,6 @@ process reads_cov_stats {
 /*
 * Reads mark duplication and recalibration
 */
-
 process bam_remove_duplicate {
     tag "${sample_name}"
 
@@ -281,7 +287,7 @@ process bam_ApplyBQSR {
     file refer_dict from genome_dict
   
     output:
-    file "${sample_name}.bqsr.bam" into bqsr_bam
+    file "${sample_name}.bqsr.bam" into bqsr_bam, sample_bam
   
     cpus = 8
 
@@ -303,12 +309,11 @@ process bam_ApplyBQSR {
 /*
 *  GATK HaplotypeCaller
 */
-
+//saveAs: {filename -> filename.indexOf("hc.g.vcf.gz.tbi") > 0 ? null : "$filename"}
 process gatk_HaplotypeCaller {
     tag "${sample_name}|${chr_name}"
 
-    publishDir "${params.outdir}/gvcf/${sample_name}",
-        saveAs: {filename -> filename.indexOf("hc.g.vcf.gz.tbi") > 0 ? null : "$filename"} 
+    publishDir "${params.outdir}/gvcf/${sample_name}"         
 
     input:
     file bam from bqsr_bam
@@ -339,12 +344,10 @@ process gatk_HaplotypeCaller {
 /*
 * GATK CombineGVCFs
 */
-
 process gatk_CombineGVCFs {
     tag "Chrom: ${chr_name}"
 
-    publishDir "${params.outdir}/merge/gvcf",
-        saveAs: {filename -> filename.indexOf("g.vcf.gz.tbi") > 0 ? null : "$filename"} 
+    publishDir "${params.outdir}/merge/gvcf"
 
     input:
     file ('gvcf/*') from sample_gvcf.collect()
@@ -373,12 +376,10 @@ process gatk_CombineGVCFs {
 /*
 * GATK GenotypeGVCFs
 */
-
 process gatk_GenotypeGVCFs {
     tag "Chrom: ${chr_name}"
 
-    publishDir "${params.outdir}/merge/vcf",
-        saveAs: {filename -> filename.indexOf("vcf.gz.tbi") > 0 ? null : "$filename"} 
+    publishDir "${params.outdir}/merge/vcf"
 
     input:
     file gvcf from merged_sample_gvcf
@@ -399,5 +400,148 @@ process gatk_GenotypeGVCFs {
         --reference ${refer} \\
         --variant ${gvcf} \\
         --output ${vcf_prefix}.vcf.gz
+    """
+}
+
+/*
+* Concat vcf
+*/
+process concat_vcf {
+
+    publishDir "${params.outdir}/vcf/all_chr"
+
+    input:
+    file ('vcf/*') from merged_sample_vcf.collect()
+    file ('vcf/*') from merged_sample_vcf_index.collect()
+
+    output:
+    file "all_sample.raw.vcf.gz" into all_sample_raw_vcf
+    file "all_sample.raw.vcf.gz.tbi" into all_sample_raw_vcf_idx
+    
+    script:
+    """
+    bcftools concat \\
+	    vcf/*.vcf.gz | \\
+        bgzip > all_sample.raw.vcf.gz
+
+    tabix -p vcf all_sample.raw.vcf.gz
+    """
+}
+
+/*
+* Basic quality filter
+*/
+process vcf_base_qual_filter {
+
+    publishDir "${params.outdir}/vcf/all_chr"
+
+    input:
+    file raw_vcf from all_sample_raw_vcf
+    file raw_vcf_idx from all_sample_raw_vcf_idx
+    
+    output:
+    file "all_sample.hq.vcf.gz" into all_hq_vcf, all_hq_vcf_for_extract
+    file "all_sample.hq.vcf.gz.tbi" into all_hq_vcf_idx, all_hq_vcf_idx_for_extract
+    
+    script:
+    """
+    bcftools filter -s LowQual -e '%QUAL<${params.quality} || INFO/DP<${params.depth}' \\
+	    all_sample.raw.vcf.gz | \\
+        grep -v LowQual | bgzip > all_sample.hq.vcf.gz
+
+    tabix -p vcf all_sample.hq.vcf.gz
+    """
+}
+
+/*
+* snpeff for combined vcf
+*/
+process snpEff_for_all {
+
+    publishDir "${params.outdir}/vcf/all_chr"
+
+    input:
+    file vcf from all_hq_vcf
+    file vcf_idx from all_hq_vcf_idx
+    
+    output:
+    file "all_sample.hq.vcf.stat.csv"
+    file "all_sample.hq.vcf.stat.html"
+    file "all_sample.ann.vcf.gz"
+    file "all_sample.ann.vcf.gz.tbi"
+    
+    script:
+    """
+    java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
+        -c ${params.snpEff}/snpEff.config \\
+        -csvStats all_sample.hq.vcf.stat.csv \\
+        -htmlStats all_sample.hq.vcf.stat.html \\
+        -v ${params.snpEff_db}  \\
+        ${vcf} \\
+        | bgzip > all_sample.ann.vcf.gz
+    
+    tabix -p vcf all_sample.ann.vcf.gz
+    """
+}
+
+
+/*
+* extract vcf file for each sample
+*/
+process extract_sample_vcf {
+    tag "${sample_name}"
+
+    publishDir "${params.outdir}/vcf/each_sample/${sample_name}"
+
+    input:
+    file vcf from all_hq_vcf_for_extract
+    file vcf_idx from all_hq_vcf_idx_for_extract
+    file bam from sample_bam
+
+    output:
+    file "${sample_name}.hq.vcf.gz" into sample_hq_vcf
+    file "${sample_name}.hq.vcf.gz.tbi" into sample_hq_vcf_idx
+    
+    script:
+    sample_name = bam.baseName - '.bqsr'
+    """
+    bcftools view -Ov -s ${sample_name} ${vcf} | \\
+	    grep -v 'PL 0/0' | bgzip > ${sample_name}.hq.vcf.gz
+
+    tabix -p vcf ${sample_name}.hq.vcf.gz
+    """
+}
+
+/*
+* snpEff for each sample
+*/
+process snpEff_for_sample {
+
+    tag "${sample_name}"
+
+    publishDir "${params.outdir}/vcf/each_sample/${sample_name}"
+
+    input:
+    file vcf from sample_hq_vcf
+    file vcf_idx from sample_hq_vcf_idx
+    
+    output:
+    file "${sample_name}.hq.vcf.stat.csv"
+    file "${sample_name}.hq.vcf.stat.html"
+    file "${sample_name}.ann.vcf.gz"
+    file "${sample_name}.ann.vcf.gz.tbi"
+    
+    script:
+    sample_name = vcf.baseName - '.hq.vcf'
+    """
+    java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
+        -c ${params.snpEff}/snpEff.config \\
+        -csvStats ${sample_name}.hq.vcf.stat.csv \\
+        -htmlStats ${sample_name}.hq.vcf.stat.html \\
+        -v ${params.snpEff_db}  \\
+        ${vcf} \\
+        | bgzip > ${sample_name}.ann.vcf.gz
+
+    tabix -p vcf ${sample_name}.ann.vcf.gz
     """
 }
