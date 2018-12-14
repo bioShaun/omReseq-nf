@@ -14,13 +14,16 @@ def helpMessage() {
       --bwa_index                   Path to reference bwa index
       --exon_bed                    Path to reference exon bed file
       --cds_bed                     Path to reference cds bed file
-      --split_bed                   Path to split bed directory
+      --split_bed              Path to split bed directory
       --known_vcf                   Path to known vcf file
 
     Mandatory arguments:
       --reads                       Path to input data (must be surrounded with quotes)
 
     Other options:
+      --quality                     
+      --depth
+      --exome                       Is the project a exom sequencing project
       --outdir                      The output directory where the results will be saved
 
     """.stripIndent()
@@ -49,12 +52,14 @@ params.exon_bed = false
 params.known_vcf = false
 params.split_bed = false
 // 30 for real data
-params.quality = 10
+params.quality = 30
 // 5 for read data
-params.depth = 2
+params.depth = 5
 // snpEff
 params.snpEff = '/public/software/snpEff/snpEffv4.3T/'
 params.snpEff_db = 'oryza_sativa'
+//
+params.exome = false
 
 // reference files
 cds_bed_file = file(params.cds_bed)
@@ -64,13 +69,24 @@ genome_fa = file(params.fasta)
 genome_path = genome_fa.getParent()
 genome_fai = file("${params.fasta}.fai")
 genome_dict = file("${genome_path}/${genome_fa.baseName}.dict")
-known_vcf = file(params.known_vcf)
-known_vcf_index = file("${params.known_vcf}.tbi")
+if (params.known_vcf) {
+    known_vcf = file(params.known_vcf)
+    known_vcf_index = file("${params.known_vcf}.tbi")
+} else {
+    known_vcf = false
+    known_vcf_index = false
+}
+
+if (params.exome) {
+    split_bed_dir  = "${params.split_bed}/exon"
+} else {
+    split_bed_dir  = "${params.split_bed}/genome"
+}
 
 // prepare split bed files
 Channel
-    .fromPath("${params.split_bed}/*bed")
-    .ifEmpty { exit 1, "Cannot find any bed file in directory: ${params.split_bed}\n!" }
+    .fromPath("${split_bed_dir}/*bed")
+    .ifEmpty { exit 1, "Cannot find any bed file in directory: ${split_bed_dir}\n!" }
     .into { haplotype_beds; combine_gvcf_beds }
 
 
@@ -113,7 +129,7 @@ process fastqc {
 process bwa_mapping {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/mapping/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}"
 
     input:
     set sample_name, file(reads) from bwa_fq_files
@@ -148,7 +164,7 @@ process bwa_mapping {
 process sort_bam {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/mapping/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}"
 
     input:
     file bam from unsort_bam
@@ -161,7 +177,8 @@ process sort_bam {
     script:
     sample_name = bam.baseName
     """	
-    samtools fixmate -m ${bam} ${sample_name}.fixmate.bam
+    samtools fixmate --threads ${task.cpus} \\
+        -m ${bam} ${sample_name}.fixmate.bam
 
     samtools sort -m 2400M --threads ${task.cpus} \\
 	    -o ${sample_name}.sort.bam \\
@@ -176,7 +193,9 @@ process reads_cov_stats {
 
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/mapping/${sample_name}"
+    module "samtools/1.9"
+
+    publishDir "${params.outdir}/alignment/${sample_name}"
 
     input:
     file samtools_stats_bam from samtools_stats_bam
@@ -217,7 +236,7 @@ process reads_cov_stats {
 process bam_remove_duplicate {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/mapping/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}"
 
     input:
     file bam from to_rmdup_bam
@@ -244,7 +263,10 @@ process bam_remove_duplicate {
 process bam_BaseRecalibrator {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/mapping/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}"
+
+    when:
+    params.known_vcf    
 
     input:
     file bam from br_rmdup_bam
@@ -277,7 +299,10 @@ process bam_BaseRecalibrator {
 process bam_ApplyBQSR {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/mapping/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}"
+
+    when:
+    params.known_vcf
 
     input:
     file bam from bqsr_rmdup_bam
@@ -313,7 +338,10 @@ process bam_ApplyBQSR {
 process gatk_HaplotypeCaller {
     tag "${sample_name}|${chr_name}"
 
-    publishDir "${params.outdir}/gvcf/${sample_name}"         
+    publishDir "${params.outdir}/gvcf/each_sample/${sample_name}" 
+
+    when:
+    params.known_vcf        
 
     input:
     file bam from bqsr_bam
@@ -347,7 +375,10 @@ process gatk_HaplotypeCaller {
 process gatk_CombineGVCFs {
     tag "Chrom: ${chr_name}"
 
-    publishDir "${params.outdir}/merge/gvcf"
+    publishDir "${params.outdir}/gvcf/all_sample"
+
+    when:
+    params.known_vcf    
 
     input:
     file ('gvcf/*') from sample_gvcf.collect()
@@ -379,7 +410,10 @@ process gatk_CombineGVCFs {
 process gatk_GenotypeGVCFs {
     tag "Chrom: ${chr_name}"
 
-    publishDir "${params.outdir}/merge/vcf"
+    publishDir "${params.outdir}/vcf/all_sample/"
+
+    when:
+    params.known_vcf    
 
     input:
     file gvcf from merged_sample_gvcf
@@ -410,6 +444,9 @@ process concat_vcf {
 
     publishDir "${params.outdir}/vcf/all_chr"
 
+    when:
+    params.known_vcf    
+
     input:
     file ('vcf/*') from merged_sample_vcf.collect()
     file ('vcf/*') from merged_sample_vcf_index.collect()
@@ -435,6 +472,9 @@ process vcf_base_qual_filter {
 
     publishDir "${params.outdir}/vcf/all_chr"
 
+    when:
+    params.known_vcf    
+
     input:
     file raw_vcf from all_sample_raw_vcf
     file raw_vcf_idx from all_sample_raw_vcf_idx
@@ -459,6 +499,9 @@ process vcf_base_qual_filter {
 process snpEff_for_all {
 
     publishDir "${params.outdir}/vcf/all_chr"
+
+    when:
+    params.known_vcf    
 
     input:
     file vcf from all_hq_vcf
@@ -493,6 +536,9 @@ process extract_sample_vcf {
 
     publishDir "${params.outdir}/vcf/each_sample/${sample_name}"
 
+    when:
+    params.known_vcf    
+
     input:
     file vcf from all_hq_vcf_for_extract
     file vcf_idx from all_hq_vcf_idx_for_extract
@@ -520,6 +566,9 @@ process snpEff_for_sample {
     tag "${sample_name}"
 
     publishDir "${params.outdir}/vcf/each_sample/${sample_name}"
+
+    when:
+    params.known_vcf    
 
     input:
     file vcf from sample_hq_vcf
