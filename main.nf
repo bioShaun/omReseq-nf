@@ -21,6 +21,7 @@ def helpMessage() {
       --reads                       Path to input data (must be surrounded with quotes)
 
     Other options:
+      --snpEff_db
       --quality                     
       --depth
       --exome                       Is the project a exom sequencing project
@@ -57,7 +58,7 @@ params.quality = 30
 params.depth = 5
 // snpEff
 params.snpEff = '/public/software/snpEff/snpEffv4.3T/'
-params.snpEff_db = 'oryza_sativa'
+params.snpEff_db = false
 //
 params.exome = false
 
@@ -129,7 +130,7 @@ process fastqc {
 process bwa_mapping {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/alignment/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
 
     input:
     set sample_name, file(reads) from bwa_fq_files
@@ -164,7 +165,7 @@ process bwa_mapping {
 process sort_bam {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/alignment/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
 
     input:
     file bam from unsort_bam
@@ -195,7 +196,7 @@ process reads_cov_stats {
 
     module "samtools/1.9"
 
-    publishDir "${params.outdir}/alignment/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
 
     input:
     file samtools_stats_bam from samtools_stats_bam
@@ -236,7 +237,7 @@ process reads_cov_stats {
 process bam_remove_duplicate {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/alignment/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
 
     input:
     file bam from to_rmdup_bam
@@ -263,7 +264,7 @@ process bam_remove_duplicate {
 process bam_BaseRecalibrator {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/alignment/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
 
     when:
     params.known_vcf    
@@ -299,7 +300,7 @@ process bam_BaseRecalibrator {
 process bam_ApplyBQSR {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/alignment/${sample_name}"
+    publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
 
     when:
     params.known_vcf
@@ -338,7 +339,7 @@ process bam_ApplyBQSR {
 process gatk_HaplotypeCaller {
     tag "${sample_name}|${chr_name}"
 
-    publishDir "${params.outdir}/gvcf/each_sample/${sample_name}" 
+    publishDir "${params.outdir}/gvcf/each_sample/${sample_name}" , mode: 'copy'
 
     when:
     params.known_vcf        
@@ -365,7 +366,12 @@ process gatk_HaplotypeCaller {
         --output ${sample_name}.${chr_name}.hc.g.vcf.gz \\
         --reference ${refer} \\
         --intervals ${bed} \\
-        --emit-ref-confidence GVCF
+        --emit-ref-confidence GVCF \\
+        --read-filter AmbiguousBaseReadFilter \\
+        --read-filter MappingQualityReadFilter \\
+        --read-filter NonZeroReferenceLengthAlignmentReadFilter \\
+        --read-filter ProperlyPairedReadFilter \\
+        --minimum-mapping-quality 30         
     """
 }
 
@@ -375,7 +381,7 @@ process gatk_HaplotypeCaller {
 process gatk_CombineGVCFs {
     tag "Chrom: ${chr_name}"
 
-    publishDir "${params.outdir}/gvcf/all_sample"
+    publishDir "${params.outdir}/gvcf/all_sample", mode: 'copy'
 
     when:
     params.known_vcf    
@@ -410,7 +416,7 @@ process gatk_CombineGVCFs {
 process gatk_GenotypeGVCFs {
     tag "Chrom: ${chr_name}"
 
-    publishDir "${params.outdir}/vcf/all_sample/"
+    publishDir "${params.outdir}/vcf/all_sample/", mode: 'copy'
 
     when:
     params.known_vcf    
@@ -442,7 +448,7 @@ process gatk_GenotypeGVCFs {
 */
 process concat_vcf {
 
-    publishDir "${params.outdir}/vcf/all_chr"
+    publishDir "${params.outdir}/vcf/all_chr", mode: 'copy'
 
     when:
     params.known_vcf    
@@ -470,7 +476,7 @@ process concat_vcf {
 */
 process vcf_base_qual_filter {
 
-    publishDir "${params.outdir}/vcf/all_chr"
+    publishDir "${params.outdir}/vcf/all_chr", mode: 'copy'
 
     when:
     params.known_vcf    
@@ -498,10 +504,10 @@ process vcf_base_qual_filter {
 */
 process snpEff_for_all {
 
-    publishDir "${params.outdir}/vcf/all_chr"
+    publishDir "${params.outdir}/vcf/all_chr", mode: 'copy'
 
     when:
-    params.known_vcf    
+    params.known_vcf && params.snpEff_db
 
     input:
     file vcf from all_hq_vcf
@@ -509,9 +515,9 @@ process snpEff_for_all {
     
     output:
     file "all_sample.hq.vcf.stat.csv"
-    file "all_sample.hq.vcf.stat.html"
-    file "all_sample.ann.vcf.gz"
-    file "all_sample.ann.vcf.gz.tbi"
+    file "all_sample.hq.vcf.stat.html" 
+    file "all_sample.ann.vcf.gz" into all_sample_anno_vcf
+    file "all_sample.ann.vcf.gz.tbi" into all_sample_anno_vcf_idx
     
     script:
     """
@@ -534,7 +540,7 @@ process snpEff_for_all {
 process extract_sample_vcf {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/vcf/each_sample/${sample_name}"
+    publishDir "${params.outdir}/vcf/each_sample/${sample_name}", mode: 'copy'
 
     when:
     params.known_vcf    
@@ -552,7 +558,8 @@ process extract_sample_vcf {
     sample_name = bam.baseName - '.bqsr'
     """
     bcftools view -Ov -s ${sample_name} ${vcf} | \\
-	    grep -v 'PL 0/0' | bgzip > ${sample_name}.hq.vcf.gz
+	    bcftools filter -i 'GT="alt"' | \\
+        bgzip > ${sample_name}.hq.vcf.gz
 
     tabix -p vcf ${sample_name}.hq.vcf.gz
     """
@@ -565,10 +572,10 @@ process snpEff_for_sample {
 
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/vcf/each_sample/${sample_name}"
+    publishDir "${params.outdir}/vcf/each_sample/${sample_name}", mode: 'copy'
 
     when:
-    params.known_vcf    
+    params.known_vcf && params.snpEff_db
 
     input:
     file vcf from sample_hq_vcf
@@ -577,7 +584,7 @@ process snpEff_for_sample {
     output:
     file "${sample_name}.hq.vcf.stat.csv"
     file "${sample_name}.hq.vcf.stat.html"
-    file "${sample_name}.ann.vcf.gz"
+    file "${sample_name}.ann.vcf.gz" into anno_vcf
     file "${sample_name}.ann.vcf.gz.tbi"
     
     script:
@@ -594,3 +601,39 @@ process snpEff_for_sample {
     tabix -p vcf ${sample_name}.ann.vcf.gz
     """
 }
+
+/*
+* SNP Table
+*/
+process snp_table {
+
+    publishDir "${params.outdir}/vcf/all_chr", mode: 'copy'
+
+    input:
+    file vcf from all_sample_anno_vcf
+    file vcf_idx from all_sample_anno_vcf_idx
+    file refer from genome_fa
+    file refer_fai from genome_fai
+    file refer_dict from genome_dict 
+
+    output:
+    file "all_sample_gatk.table.txt" into gatk_vcf_table
+    file "all_sample.vcf.table.txt" into om_vcf_table
+
+    script:
+    """
+    java -jar /public/software/GATK/GATK.3.8/GenomeAnalysisTK.jar \\
+        -T VariantsToTable \\
+        -R ${refer} \\
+        -V ${vcf} \\
+        -F CHROM -F POS -F REF -F ALT \\
+        -GF AD -GF DP -GF GQ -GF PL \\
+        -o all_sample_gatk.table.txt
+    
+    gunzip -c ${vcf} > ${vcf.baseName}
+
+    python /public/scripts/Reseq/omtools/extractTableFromsnpEff.py \\
+        -v ${vcf.baseName} \\
+        -o all_sample.vcf.table.txt
+    """
+    }
