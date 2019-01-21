@@ -335,7 +335,6 @@ process bam_ApplyBQSR {
 /*
 *  GATK HaplotypeCaller
 */
-//saveAs: {filename -> filename.indexOf("hc.g.vcf.gz.tbi") > 0 ? null : "$filename"}
 process gatk_HaplotypeCaller {
     tag "${sample_name}|${chr_name}"
 
@@ -636,4 +635,4 @@ process snp_table {
         -v ${vcf.baseName} \\
         -o all_sample.vcf.table.txt
     """
-    }
+}
