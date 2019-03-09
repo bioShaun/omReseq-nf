@@ -1,9 +1,5 @@
 #!/usr/bin/env nextflow
 
-// TODO
-// No cds bed file?
-
-
 def helpMessage() {
     log.info """
 
@@ -14,21 +10,26 @@ def helpMessage() {
       --bwa_index                   Path to reference bwa index
       --exon_bed                    Path to reference exon bed file
       --cds_bed                     Path to reference cds bed file
-      --split_bed              Path to split bed directory
+      --padded_bed                  Path to reference pedded bed file
+      --split_bed                   Path to split bed directory
       --known_vcf                   Path to known vcf file
 
     Mandatory arguments:
       --reads                       Path to input data (must be surrounded with quotes)
+      --outdir                      The output directory where the results will be saved
 
     Other options:
-      --snpEff_db
-      --quality                     
-      --depth
+      --snpEff_db                   snpEff database name
+      --quality                     GATK reads quality threshold
+      --depth                       GATK reads depth threshold
       --exome                       Is the project a exom sequencing project
-      --outdir                      The output directory where the results will be saved
+      --merge_chr_bed               bedfile to guide merge split chr information
 
     """.stripIndent()
 }
+
+// workflow internal path&files
+script_dir = file("$baseDir/script/")
 
 /*
  * SET UP CONFIGURATION VARIABLES
@@ -41,26 +42,22 @@ if (params.help){
     exit 0
 }
 
-
 // default parameters
-params.skip_qc = true
-params.skip_fastqc = false
+params.skip_qc = false
 params.fasta = false
 params.bwa_index = false
 params.reads = false
 params.cds_bed = false
 params.exon_bed = false
+params.padded_bed = false
 params.known_vcf = false
 params.split_bed = false
-// 30 for real data
 params.quality = 30
-// 5 for read data
 params.depth = 5
-// snpEff
 params.snpEff = '/public/software/snpEff/snpEffv4.3T/'
 params.snpEff_db = false
-//
 params.exome = false
+params.merge_chr_bed = false
 
 // reference files
 cds_bed_file = file(params.cds_bed)
@@ -79,9 +76,20 @@ if (params.known_vcf) {
 }
 
 if (params.exome) {
-    split_bed_dir  = "${params.split_bed}/exon"
+    if (params.padded_bed) {
+        split_bed_dir  = "${params.split_bed}/padded"
+    } else {
+        split_bed_dir  = "${params.split_bed}/exon"
+    }
+    
 } else {
     split_bed_dir  = "${params.split_bed}/genome"
+}
+
+if (params.padded_bed) {
+    padded_bed_file = file(params.padded_bed)
+} else {
+    padded_bed_file = exon_bed_file
 }
 
 // prepare split bed files
@@ -95,34 +103,41 @@ Channel
 Channel
     .fromFilePairs("${params.reads}")
     .ifEmpty { exit 1, "Cannot find any reads matching: ${params.reads}\n!" }
-    .into { fastqc_fq_files;  bwa_fq_files }
+    .set { raw_fq_files }
 
 /*
- * FastQC
+ * Fastp
  */
-process fastqc {
-    tag "${name}"
-    
-    publishDir "${params.outdir}/fastqc", mode: 'copy',
-        saveAs: {filename -> filename.indexOf(".zip") > 0 ? "zips/$filename" : "$filename"}
 
-    when:
-    !params.skip_qc && !params.skip_fastqc
+process fastp {
+
+    tag "${name}"
+
+    module "fastp/0.19.5"
+
+    publishDir "${params.outdir}/fastp_trimmed_reads/${name}", mode: 'copy'
 
     input:
-    set name, file(reads) from fastqc_fq_files
+    set name, file(reads) from raw_fq_files
 
     output:
-    file "*_fastqc.{zip,html}" into fastqc_results
+    file "*trimmed.R*.fq.gz" into trimmed_reads
+    file "${name}.json" into fastp_json
+    file "${name}.html" into fastp_html
 
-    cpus = 2
+    cpus = 4
 
     script:
     """
-    fastqc -q ${reads}
+    fastp \\
+        --in1 ${reads[0]} \\
+        --in2 ${reads[1]} \\
+        --out1 ${name}.trimmed.R1.fq.gz \\
+        --out2 ${name}.trimmed.R2.fq.gz \\
+        --json ${name}.json \\
+        --html ${name}.html    
     """
-}
-
+}  
 
 /*
 * BWA Mapping
@@ -133,16 +148,17 @@ process bwa_mapping {
     publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
 
     input:
-    set sample_name, file(reads) from bwa_fq_files
+    file reads from trimmed_reads
     file bwa_index_file from bwa_index_file
     file genome_fa from genome_fa
 
     output: 
     file "${sample_name}.bam" into unsort_bam
 
-    cpus = 16
+    cpus = 20
 
-    script:    
+    script:
+    sample_name = reads[0].toString() - '.trimmed.R1.fq.gz'
     """
     bwa mem -M -a \\
 	    -R \"@RG\\tID:${sample_name}\\tSM:${sample_name}\\tLB:${sample_name}\\tPI:350\\tPL:Illumina\\tCN:TCuni\" \\
@@ -338,8 +354,6 @@ process bam_ApplyBQSR {
 process gatk_HaplotypeCaller {
     tag "${sample_name}|${chr_name}"
 
-    publishDir "${params.outdir}/gvcf/each_sample/${sample_name}" , mode: 'copy'
-
     when:
     params.known_vcf        
 
@@ -351,8 +365,8 @@ process gatk_HaplotypeCaller {
     file refer_dict from genome_dict    
 
     output:
-    file "${sample_name}.${chr_name}.hc.g.vcf.gz" into sample_gvcf
-    file "${sample_name}.${chr_name}.hc.g.vcf.gz.tbi" into sample_gvcf_index
+    file "${sample_name}.${chr_name}.hc.g.vcf.gz" into sample_gvcf, chr_gvcf
+    file "${sample_name}.${chr_name}.hc.g.vcf.gz.tbi" into sample_gvcf_index, chr_gvcf_index
     
     cpus = 8
 
@@ -380,22 +394,22 @@ process gatk_HaplotypeCaller {
 process gatk_CombineGVCFs {
     tag "Chrom: ${chr_name}"
 
-    publishDir "${params.outdir}/gvcf/all_sample", mode: 'copy'
+    publishDir "${params.outdir}/gvcf/by_chr/${chr_name}", mode: 'copy'
 
     when:
     params.known_vcf    
 
     input:
-    file ('gvcf/*') from sample_gvcf.collect()
-    file ('gvcf/*') from sample_gvcf_index.collect()
+    file ('gvcf/*') from chr_gvcf.collect()
+    file ('gvcf/*') from chr_gvcf_index.collect()
     each file(bed) from combine_gvcf_beds
     file refer from genome_fa
     file refer_fai from genome_fai
     file refer_dict from genome_dict    
     
     output:
-    file "all_sample.${chr_name}.g.vcf.gz" into merged_sample_gvcf
-    file "all_sample.${chr_name}.g.vcf.gz.tbi" into merged_sample_gvcf_index
+    file "${chr_name}.g.vcf.gz" into merged_sample_gvcf
+    file "${chr_name}.g.vcf.gz.tbi" into merged_sample_gvcf_index
     
     script:
     chr_name = bed.baseName
@@ -403,7 +417,7 @@ process gatk_CombineGVCFs {
     ls gvcf/*.${chr_name}.hc.g.vcf.gz > ${chr_name}.gvcf.list
 
     gatk CombineGVCFs \\
-    	--output all_sample.${chr_name}.g.vcf.gz \\
+    	--output ${chr_name}.g.vcf.gz \\
 	    --reference ${refer} \\
 	    --variant ${chr_name}.gvcf.list
     """
@@ -415,7 +429,7 @@ process gatk_CombineGVCFs {
 process gatk_GenotypeGVCFs {
     tag "Chrom: ${chr_name}"
 
-    publishDir "${params.outdir}/vcf/all_sample/", mode: 'copy'
+    publishDir "${params.outdir}/vcf/by_chr/${chr_name}", mode: 'copy'
 
     when:
     params.known_vcf    
@@ -428,17 +442,20 @@ process gatk_GenotypeGVCFs {
     file refer_dict from genome_dict    
     
     output:
-    file "${vcf_prefix}.vcf.gz" into merged_sample_vcf
-    file "${vcf_prefix}.vcf.gz.tbi" into merged_sample_vcf_index
+    file "${chr_name}.vcf.gz" into merged_sample_vcf
+    file "${chr_name}.vcf.gz.tbi" into merged_sample_vcf_index
+
+    cpus = 8
     
     script:
-    vcf_prefix = gvcf.baseName - '.g.vcf'
-    chr_name = vcf_prefix - 'all_sample.'
+    chr_name = gvcf.baseName - '.g.vcf'
+
     """
     gatk GenotypeGVCFs \\
         --reference ${refer} \\
         --variant ${gvcf} \\
-        --output ${vcf_prefix}.vcf.gz
+        --intervals ${split_bed_dir}/${chr_name}.bed \\
+        --output ${chr_name}.vcf.gz
     """
 }
 
@@ -447,7 +464,7 @@ process gatk_GenotypeGVCFs {
 */
 process concat_vcf {
 
-    publishDir "${params.outdir}/vcf/all_chr", mode: 'copy'
+    publishDir "${params.outdir}/vcf/all", mode: 'copy'
 
     when:
     params.known_vcf    
@@ -457,16 +474,18 @@ process concat_vcf {
     file ('vcf/*') from merged_sample_vcf_index.collect()
 
     output:
-    file "all_sample.raw.vcf.gz" into all_sample_raw_vcf
-    file "all_sample.raw.vcf.gz.tbi" into all_sample_raw_vcf_idx
+    file "raw.vcf.gz" into all_sample_raw_vcf
+    file "raw.vcf.gz.tbi" into all_sample_raw_vcf_idx
+
+    cpus = 8
     
     script:
     """
     bcftools concat \\
 	    vcf/*.vcf.gz | \\
-        bgzip > all_sample.raw.vcf.gz
+        bgzip > raw.vcf.gz
 
-    tabix -p vcf all_sample.raw.vcf.gz
+    tabix -p vcf raw.vcf.gz
     """
 }
 
@@ -475,7 +494,7 @@ process concat_vcf {
 */
 process vcf_base_qual_filter {
 
-    publishDir "${params.outdir}/vcf/all_chr", mode: 'copy'
+    publishDir "${params.outdir}/vcf/all", mode: 'copy'
 
     when:
     params.known_vcf    
@@ -485,16 +504,18 @@ process vcf_base_qual_filter {
     file raw_vcf_idx from all_sample_raw_vcf_idx
     
     output:
-    file "all_sample.hq.vcf.gz" into all_hq_vcf, all_hq_vcf_for_extract
-    file "all_sample.hq.vcf.gz.tbi" into all_hq_vcf_idx, all_hq_vcf_idx_for_extract
+    file "hq.vcf.gz" into all_hq_vcf
+    file "hq.vcf.gz.tbi" into all_hq_vcf_idx
+
+    cpus = 8
     
     script:
     """
-    bcftools filter -s LowQual -e '%QUAL<${params.quality} || INFO/DP<${params.depth}' \\
-	    all_sample.raw.vcf.gz | \\
-        grep -v LowQual | bgzip > all_sample.hq.vcf.gz
+    bcftools filter -e '%QUAL<${params.quality} || INFO/DP<${params.depth}' \\
+	    raw.vcf.gz | \\
+        bgzip > hq.vcf.gz
 
-    tabix -p vcf all_sample.hq.vcf.gz
+    tabix -p vcf hq.vcf.gz
     """
 }
 
@@ -503,7 +524,7 @@ process vcf_base_qual_filter {
 */
 process snpEff_for_all {
 
-    publishDir "${params.outdir}/vcf/all_chr", mode: 'copy'
+    publishDir "${params.outdir}/vcf/all", mode: 'copy'
 
     when:
     params.known_vcf && params.snpEff_db
@@ -513,22 +534,22 @@ process snpEff_for_all {
     file vcf_idx from all_hq_vcf_idx
     
     output:
-    file "all_sample.hq.vcf.stat.csv"
-    file "all_sample.hq.vcf.stat.html" 
-    file "all_sample.ann.vcf.gz" into all_sample_anno_vcf
-    file "all_sample.ann.vcf.gz.tbi" into all_sample_anno_vcf_idx
+    file "hq.vcf.stat.csv"
+    file "hq.vcf.stat.html" 
+    file "hq.ann.vcf.gz" into all_sample_anno_vcf, all_sample_anno_split_vcf
+    file "hq.ann.vcf.gz.tbi" into all_sample_anno_vcf_idx, all_sample_anno_split_vcf_idx
     
     script:
     """
     java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
         -c ${params.snpEff}/snpEff.config \\
-        -csvStats all_sample.hq.vcf.stat.csv \\
-        -htmlStats all_sample.hq.vcf.stat.html \\
+        -csvStats hq.vcf.stat.csv \\
+        -htmlStats hq.vcf.stat.html \\
         -v ${params.snpEff_db}  \\
         ${vcf} \\
-        | bgzip > all_sample.ann.vcf.gz
+        | bgzip > hq.ann.vcf.gz
     
-    tabix -p vcf all_sample.ann.vcf.gz
+    tabix -p vcf hq.ann.vcf.gz
     """
 }
 
@@ -536,28 +557,105 @@ process snpEff_for_all {
 /*
 * extract vcf file for each sample
 */
-process extract_sample_vcf {
+
+process gatk_CombineGVCFs_by_sample {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/vcf/each_sample/${sample_name}", mode: 'copy'
+    publishDir "${params.outdir}/gvcf/by_sample/${sample_name}", mode: 'copy'
 
     when:
     params.known_vcf    
 
     input:
-    file vcf from all_hq_vcf_for_extract
-    file vcf_idx from all_hq_vcf_idx_for_extract
+    file ('gvcf/*') from sample_gvcf.collect()
+    file ('gvcf/*') from sample_gvcf_index.collect()
+    file padded_bed_file from padded_bed_file
+    file refer from genome_fa
+    file refer_fai from genome_fai
+    file refer_dict from genome_dict    
     file bam from sample_bam
 
     output:
-    file "${sample_name}.hq.vcf.gz" into sample_hq_vcf
-    file "${sample_name}.hq.vcf.gz.tbi" into sample_hq_vcf_idx
+    file "${sample_name}.g.vcf.gz" into merged_sample_chr_gvcf
+    file "${sample_name}.g.vcf.gz.tbi" into merged_sample_chr_gvcf_idx
+
+    cpus = 8
     
     script:
     sample_name = bam.baseName - '.bqsr'
     """
-    bcftools view -Ov -s ${sample_name} ${vcf} | \\
-	    bcftools filter -i 'GT="alt"' | \\
+    ls gvcf/${sample_name}.*.hc.g.vcf.gz > ${sample_name}.gvcf.list
+
+    gatk CombineGVCFs \\
+    	--output ${sample_name}.g.vcf.gz \\
+	    --reference ${refer} \\
+	    --variant ${sample_name}.gvcf.list
+    """
+}
+
+process gatk_GenotypeGVCFs_by_sample {
+    tag "${sample_name}"
+
+    publishDir "${params.outdir}/vcf/by_sample/${sample_name}", mode: 'copy'
+
+    when:
+    params.known_vcf    
+
+    input:
+    file gvcf from merged_sample_chr_gvcf
+    file gvcf_index from merged_sample_chr_gvcf_idx
+    file refer from genome_fa
+    file refer_fai from genome_fai
+    file refer_dict from genome_dict    
+    
+    output:
+    file "${sample_name}.raw.vcf.gz" into merged_sample_chr_vcf
+    file "${sample_name}.raw.vcf.gz.tbi" into merged_sample_chr_vcf_index
+
+    cpus = 8
+    
+    script:
+    sample_name = gvcf.baseName - '.g.vcf'
+    if (params.exome)
+        """
+        gatk GenotypeGVCFs \\
+            --reference ${refer} \\
+            --variant ${gvcf} \\
+            --intervals ${padded_bed_file} \\
+            --output ${sample_name}.raw.vcf.gz
+        """
+    else 
+        """
+        gatk GenotypeGVCFs \\
+            --reference ${refer} \\
+            --variant ${gvcf} \\
+            --output ${sample_name}.raw.vcf.gz        
+        """
+}
+
+process vcf_base_qual_filter_by_sample {
+    tag "${sample_name}"
+
+    publishDir "${params.outdir}/vcf/by_sample/${sample_name}", mode: 'copy'
+
+    when:
+    params.known_vcf    
+
+    input:
+    file raw_vcf from merged_sample_chr_vcf
+    file raw_vcf_idx from merged_sample_chr_vcf_index
+    
+    output:
+    file "${sample_name}.hq.vcf.gz" into sample_hq_vcf
+    file "${sample_name}.hq.vcf.gz.tbi" into sample_hq_vcf_idx
+
+    cpus = 8
+    
+    script:
+    sample_name = raw_vcf.baseName - '.raw.vcf'
+    """
+    bcftools filter -e '%QUAL<${params.quality} || INFO/DP<${params.depth}' \\
+	    ${raw_vcf} | \\
         bgzip > ${sample_name}.hq.vcf.gz
 
     tabix -p vcf ${sample_name}.hq.vcf.gz
@@ -571,7 +669,7 @@ process snpEff_for_sample {
 
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/vcf/each_sample/${sample_name}", mode: 'copy'
+    publishDir "${params.outdir}/vcf/by_sample/${sample_name}", mode: 'copy'
 
     when:
     params.known_vcf && params.snpEff_db
@@ -583,8 +681,8 @@ process snpEff_for_sample {
     output:
     file "${sample_name}.hq.vcf.stat.csv"
     file "${sample_name}.hq.vcf.stat.html"
-    file "${sample_name}.ann.vcf.gz" into anno_vcf
-    file "${sample_name}.ann.vcf.gz.tbi"
+    file "${sample_name}.ann.vcf.gz" into single_sample_anno_vcf
+    file "${sample_name}.ann.vcf.gz.tbi" into single_sample_anno_vcf_idx
     
     script:
     sample_name = vcf.baseName - '.hq.vcf'
@@ -602,11 +700,49 @@ process snpEff_for_sample {
 }
 
 /*
+* concat split chr by sample
+*/
+process merge_split_chr_by_sample {
+    tag "${sample_name}"
+
+    publishDir "${params.outdir}/vcf/by_sample", mode: 'copy'
+
+    when:
+    params.merge_chr_bed && params.known_vcf && params.snpEff_db
+
+    input:
+    file vcf from single_sample_anno_vcf
+
+    output:
+    file "${sample_name}.ann.catChr.vcf.gz" into merge_chr_file_by_sample
+
+    script:
+    sample_name = vcf.baseName - '.ann.vcf'
+    """
+    #!/bin/bash
+
+    source /usr/bin/virtualenvwrapper.sh
+    workon work_py3
+
+    python ${script_dir}/merge_wheat_vcf_chr.py \\
+        --vcf-file ${vcf} \\
+        --split-chr-inf ${params.merge_chr_bed}
+
+    tabix --csi ${sample_name}.ann.catChr.vcf.gz
+    """
+}
+
+
+
+/*
 * SNP Table
 */
 process snp_table {
 
-    publishDir "${params.outdir}/vcf/all_chr", mode: 'copy'
+    publishDir "${params.outdir}/vcf/all", mode: 'copy'
+
+    when:
+    params.known_vcf && params.snpEff_db
 
     input:
     file vcf from all_sample_anno_vcf
@@ -616,8 +752,8 @@ process snp_table {
     file refer_dict from genome_dict 
 
     output:
-    file "all_sample_gatk.table.txt" into gatk_vcf_table
-    file "all_sample.vcf.table.txt" into om_vcf_table
+    file "vcf.gatk.table.txt" into gatk_vcf_table
+    file "vcf.table.txt" into om_vcf_table
 
     script:
     """
@@ -627,12 +763,51 @@ process snp_table {
         -V ${vcf} \\
         -F CHROM -F POS -F REF -F ALT \\
         -GF AD -GF DP -GF GQ -GF PL \\
-        -o all_sample_gatk.table.txt
+        -o vcf.gatk.table.txt
     
-    gunzip -c ${vcf} > ${vcf.baseName}
+    python ${script_dir}/extractTableFromsnpEff.py \\
+        -v ${vcf}  \\
+        -o vcf.table.txt
+    """
+}
 
-    python /public/scripts/Reseq/omtools/extractTableFromsnpEff.py \\
-        -v ${vcf.baseName} \\
-        -o all_sample.vcf.table.txt
+/*
+* concat split chr
+*/
+process merge_split_chr {
+
+    publishDir "${params.outdir}/vcf/all", mode: 'copy'
+
+    when:
+    params.merge_chr_bed && params.known_vcf && params.snpEff_db
+
+    input:
+    file anno_vcf from all_sample_anno_split_vcf
+    file om_vcf_table from om_vcf_table
+    file gatk_vcf_table from gatk_vcf_table
+
+    output:
+    file "*catChr*" into merge_chr_file
+
+    script:
+    """
+    #!/bin/bash
+
+    source /usr/bin/virtualenvwrapper.sh
+    workon work_py3
+
+    python ${script_dir}/merge_wheat_vcf_chr.py \\
+        --vcf-file ${anno_vcf} \\
+        --split-chr-inf ${params.merge_chr_bed}
+
+    tabix --csi hq.ann.catChr.vcf.gz
+
+    python ${script_dir}/merge_wheat_vcf_chr.py \\
+        --vcf-file ${om_vcf_table} \\
+        --split-chr-inf ${params.merge_chr_bed}
+
+    python ${script_dir}/merge_wheat_vcf_chr.py \\
+        --vcf-file ${gatk_vcf_table} \\
+        --split-chr-inf ${params.merge_chr_bed}        
     """
 }
