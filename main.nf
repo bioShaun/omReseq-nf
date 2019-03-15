@@ -155,7 +155,7 @@ process bwa_mapping {
     output: 
     file "${sample_name}.bam" into unsort_bam
 
-    cpus = 20
+    cpus = 40
 
     script:
     sample_name = reads[0].toString() - '.trimmed.R1.fq.gz'
@@ -540,17 +540,44 @@ process snpEff_for_all {
     file "hq.ann.vcf.gz.tbi" into all_sample_anno_vcf_idx, all_sample_anno_split_vcf_idx
     
     script:
-    """
-    java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
-        -c ${params.snpEff}/snpEff.config \\
-        -csvStats hq.vcf.stat.csv \\
-        -htmlStats hq.vcf.stat.html \\
-        -v ${params.snpEff_db}  \\
-        ${vcf} \\
-        | bgzip > hq.ann.vcf.gz
-    
-    tabix -p vcf hq.ann.vcf.gz
-    """
+    if (params.merge_chr_bed)
+        """
+        #!/bin/bash
+
+        source /usr/bin/virtualenvwrapper.sh
+        workon work_py3
+
+        mv hq.vcf.gz hq.split.vcf.gz 
+
+        python ${script_dir}/merge_wheat_vcf_chr.py \\
+            --vcf-file hq.split.vcf.gz  \\
+            --split-chr-inf ${params.merge_chr_bed} \\
+            | bgzip > hq.vcf.gz 
+
+        tabix --csi hq.ann.catChr.vcf.gz
+
+        java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
+            -c ${params.snpEff}/snpEff.config \\
+            -csvStats hq.vcf.stat.csv \\
+            -htmlStats hq.vcf.stat.html \\
+            -v ${params.snpEff_db}  \\
+            hq.vcf.gz \\
+            | bgzip > hq.ann.vcf.gz
+        
+        tabix --csi vcf hq.ann.vcf.gz
+        """
+    else
+        """
+        java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
+            -c ${params.snpEff}/snpEff.config \\
+            -csvStats hq.vcf.stat.csv \\
+            -htmlStats hq.vcf.stat.html \\
+            -v ${params.snpEff_db}  \\
+            ${vcf} \\
+            | bgzip > hq.ann.vcf.gz
+        
+        tabix -p vcf hq.ann.vcf.gz        
+        """
 }
 
 
@@ -686,53 +713,43 @@ process snpEff_for_sample {
     
     script:
     sample_name = vcf.baseName - '.hq.vcf'
-    """
-    java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
-        -c ${params.snpEff}/snpEff.config \\
-        -csvStats ${sample_name}.hq.vcf.stat.csv \\
-        -htmlStats ${sample_name}.hq.vcf.stat.html \\
-        -v ${params.snpEff_db}  \\
-        ${vcf} \\
-        | bgzip > ${sample_name}.ann.vcf.gz
+    if (params.merge_chr_bed)
+        """
+        #!/bin/bash
 
-    tabix -p vcf ${sample_name}.ann.vcf.gz
-    """
+        source /usr/bin/virtualenvwrapper.sh
+        workon work_py3      
+
+        mv ${sample_name}.hq.vcf.gz ${sample_name}.hq.split.vcf.gz
+
+        python ${script_dir}/merge_wheat_vcf_chr.py \\
+            --vcf-file ${sample_name}.hq.split.vcf.gz \\
+            --split-chr-inf ${params.merge_chr_bed} \\
+            | bgzip > ${sample_name}.hq.vcf.gz
+
+        java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
+            -c ${params.snpEff}/snpEff.config \\
+            -csvStats ${sample_name}.hq.vcf.stat.csv \\
+            -htmlStats ${sample_name}.hq.vcf.stat.html \\
+            -v ${params.snpEff_db}  \\
+            ${sample_name}.hq.vcf.gz \\
+            | bgzip > ${sample_name}.ann.vcf.gz
+
+        tabix --csi vcf ${sample_name}.ann.vcf.gz        
+        """
+    else
+        """
+        java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
+            -c ${params.snpEff}/snpEff.config \\
+            -csvStats ${sample_name}.hq.vcf.stat.csv \\
+            -htmlStats ${sample_name}.hq.vcf.stat.html \\
+            -v ${params.snpEff_db}  \\
+            ${vcf} \\
+            | bgzip > ${sample_name}.ann.vcf.gz
+
+        tabix -p vcf ${sample_name}.ann.vcf.gz
+        """
 }
-
-/*
-* concat split chr by sample
-*/
-process merge_split_chr_by_sample {
-    tag "${sample_name}"
-
-    publishDir "${params.outdir}/vcf/by_sample", mode: 'copy'
-
-    when:
-    params.merge_chr_bed && params.known_vcf && params.snpEff_db
-
-    input:
-    file vcf from single_sample_anno_vcf
-
-    output:
-    file "${sample_name}.ann.catChr.vcf.gz" into merge_chr_file_by_sample
-
-    script:
-    sample_name = vcf.baseName - '.ann.vcf'
-    """
-    #!/bin/bash
-
-    source /usr/bin/virtualenvwrapper.sh
-    workon work_py3
-
-    python ${script_dir}/merge_wheat_vcf_chr.py \\
-        --vcf-file ${vcf} \\
-        --split-chr-inf ${params.merge_chr_bed}
-
-    tabix --csi ${sample_name}.ann.catChr.vcf.gz
-    """
-}
-
-
 
 /*
 * SNP Table
@@ -768,46 +785,5 @@ process snp_table {
     python ${script_dir}/extractTableFromsnpEff.py \\
         -v ${vcf}  \\
         -o vcf.table.txt
-    """
-}
-
-/*
-* concat split chr
-*/
-process merge_split_chr {
-
-    publishDir "${params.outdir}/vcf/all", mode: 'copy'
-
-    when:
-    params.merge_chr_bed && params.known_vcf && params.snpEff_db
-
-    input:
-    file anno_vcf from all_sample_anno_split_vcf
-    file om_vcf_table from om_vcf_table
-    file gatk_vcf_table from gatk_vcf_table
-
-    output:
-    file "*catChr*" into merge_chr_file
-
-    script:
-    """
-    #!/bin/bash
-
-    source /usr/bin/virtualenvwrapper.sh
-    workon work_py3
-
-    python ${script_dir}/merge_wheat_vcf_chr.py \\
-        --vcf-file ${anno_vcf} \\
-        --split-chr-inf ${params.merge_chr_bed}
-
-    tabix --csi hq.ann.catChr.vcf.gz
-
-    python ${script_dir}/merge_wheat_vcf_chr.py \\
-        --vcf-file ${om_vcf_table} \\
-        --split-chr-inf ${params.merge_chr_bed}
-
-    python ${script_dir}/merge_wheat_vcf_chr.py \\
-        --vcf-file ${gatk_vcf_table} \\
-        --split-chr-inf ${params.merge_chr_bed}        
     """
 }
