@@ -464,8 +464,6 @@ process gatk_GenotypeGVCFs {
 */
 process concat_vcf {
 
-    publishDir "${params.outdir}/vcf/all", mode: 'copy'
-
     when:
     params.known_vcf    
 
@@ -474,8 +472,8 @@ process concat_vcf {
     file ('vcf/*') from merged_sample_vcf_index.collect()
 
     output:
-    file "raw.vcf.gz" into all_sample_raw_vcf
-    file "raw.vcf.gz.tbi" into all_sample_raw_vcf_idx
+    file "raw.vcf.gz" into all_sample_raw_vcf, m_all_sample_raw_vcf
+    file "raw.vcf.gz.tbi" into all_sample_raw_vcf_idx, m_all_sample_raw_vcf_idx
 
     cpus = 8
     
@@ -494,8 +492,6 @@ process concat_vcf {
 */
 process vcf_base_qual_filter {
 
-    publishDir "${params.outdir}/vcf/all", mode: 'copy'
-
     when:
     params.known_vcf    
 
@@ -504,8 +500,8 @@ process vcf_base_qual_filter {
     file raw_vcf_idx from all_sample_raw_vcf_idx
     
     output:
-    file "hq.vcf.gz" into all_hq_vcf
-    file "hq.vcf.gz.tbi" into all_hq_vcf_idx
+    file "hq.vcf.gz" into all_hq_vcf, all_hq_vcf_table
+    file "hq.vcf.gz.tbi" into all_hq_vcf_idx, all_hq_vcf_idx_table
 
     cpus = 8
     
@@ -516,6 +512,39 @@ process vcf_base_qual_filter {
         bgzip > hq.vcf.gz
 
     tabix -p vcf hq.vcf.gz
+    """
+}
+
+
+/*
+* SNP Table 1
+*/
+process snp_gatk_table {
+
+    publishDir "${params.outdir}/vcf/all", mode: 'copy'
+
+    when:
+    params.known_vcf && params.snpEff_db
+
+    input:
+    file vcf from all_hq_vcf_table
+    file vcf_idx from all_hq_vcf_idx_table
+    file refer from genome_fa
+    file refer_fai from genome_fai
+    file refer_dict from genome_dict 
+
+    output:
+    file "vcf.gatk.table.txt" into gatk_vcf_table
+
+    script:
+    """
+    java -jar /public/software/GATK/GATK.3.8/GenomeAnalysisTK.jar \\
+        -T VariantsToTable \\
+        -R ${refer} \\
+        -V ${vcf} \\
+        -F CHROM -F POS -F REF -F ALT \\
+        -GF AD -GF DP -GF GQ -GF PL \\
+        -o vcf.gatk.table.txt
     """
 }
 
@@ -530,14 +559,20 @@ process snpEff_for_all {
     params.known_vcf && params.snpEff_db
 
     input:
+    file raw_vcf from m_all_sample_raw_vcf
+    file raw_vcf_idx from m_all_sample_raw_vcf_idx
     file vcf from all_hq_vcf
     file vcf_idx from all_hq_vcf_idx
     
     output:
+    file "raw.vcf.gz" into final_all_raw_vcf
+    file "raw.vcf.gz.*" into final_all_raw_vcf_idx    
+    file "hq.vcf.gz" into final_all_hq_vcf
+    file "hq.vcf.gz.*" into final_all_hq_vcf_idx
     file "hq.vcf.stat.csv"
     file "hq.vcf.stat.html" 
     file "hq.ann.vcf.gz" into all_sample_anno_vcf, all_sample_anno_split_vcf
-    file "hq.ann.vcf.gz.tbi" into all_sample_anno_vcf_idx, all_sample_anno_split_vcf_idx
+    file "hq.ann.vcf.gz.*" into all_sample_anno_vcf_idx, all_sample_anno_split_vcf_idx
     
     script:
     if (params.merge_chr_bed)
@@ -547,14 +582,23 @@ process snpEff_for_all {
         source /usr/bin/virtualenvwrapper.sh
         workon work_py3
 
-        mv hq.vcf.gz hq.split.vcf.gz 
+        mv raw.vcf.gz raw.split.vcf.gz
+        mv raw.vcf.gz.tbi raw.split.vcf.gz.tbi
 
-        python ${script_dir}/merge_wheat_vcf_chr.py \\
-            --vcf-file hq.split.vcf.gz  \\
-            --split-chr-inf ${params.merge_chr_bed} \\
-            | bgzip > hq.vcf.gz 
+        gunzip -c raw.split.vcf.gz > raw.split.vcf
 
-        tabix --csi hq.ann.catChr.vcf.gz
+        sh ${script_dir}/catSplitChrVCF.sh \\
+            raw.split.vcf \\
+            raw.vcf        
+
+        mv hq.vcf.gz hq.split.vcf.gz
+        mv hq.vcf.gz.tbi hq.split.vcf.gz.tbi
+
+        gunzip -c hq.split.vcf.gz > hq.split.vcf
+
+        sh ${script_dir}/catSplitChrVCF.sh \\
+            hq.split.vcf \\
+            hq.vcf
 
         java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
             -c ${params.snpEff}/snpEff.config \\
@@ -564,7 +608,9 @@ process snpEff_for_all {
             hq.vcf.gz \\
             | bgzip > hq.ann.vcf.gz
         
-        tabix --csi vcf hq.ann.vcf.gz
+        tabix --csi hq.ann.vcf.gz
+
+        rm *.vcf
         """
     else
         """
@@ -623,8 +669,6 @@ process gatk_CombineGVCFs_by_sample {
 process gatk_GenotypeGVCFs_by_sample {
     tag "${sample_name}"
 
-    publishDir "${params.outdir}/vcf/by_sample/${sample_name}", mode: 'copy'
-
     when:
     params.known_vcf    
 
@@ -636,8 +680,8 @@ process gatk_GenotypeGVCFs_by_sample {
     file refer_dict from genome_dict    
     
     output:
-    file "${sample_name}.raw.vcf.gz" into merged_sample_chr_vcf
-    file "${sample_name}.raw.vcf.gz.tbi" into merged_sample_chr_vcf_index
+    file "${sample_name}.raw.vcf.gz" into merged_sample_chr_vcf, m_merged_sample_chr_vcf
+    file "${sample_name}.raw.vcf.gz.tbi" into merged_sample_chr_vcf_index, m_merged_sample_chr_vcf_index
 
     cpus = 8
     
@@ -662,8 +706,6 @@ process gatk_GenotypeGVCFs_by_sample {
 
 process vcf_base_qual_filter_by_sample {
     tag "${sample_name}"
-
-    publishDir "${params.outdir}/vcf/by_sample/${sample_name}", mode: 'copy'
 
     when:
     params.known_vcf    
@@ -702,14 +744,20 @@ process snpEff_for_sample {
     params.known_vcf && params.snpEff_db
 
     input:
+    file "raw_vcf/*" from m_merged_sample_chr_vcf.collect()
+    file "raw_vcf/*" from m_merged_sample_chr_vcf_index.collect()
     file vcf from sample_hq_vcf
     file vcf_idx from sample_hq_vcf_idx
     
     output:
+    file "${sample_name}.raw.vcf.gz"
+    file "${sample_name}.raw.vcf.gz.*"
+    file "${sample_name}.hq.vcf.gz"
+    file "${sample_name}.hq.vcf.gz.*"
     file "${sample_name}.hq.vcf.stat.csv"
     file "${sample_name}.hq.vcf.stat.html"
     file "${sample_name}.ann.vcf.gz" into single_sample_anno_vcf
-    file "${sample_name}.ann.vcf.gz.tbi" into single_sample_anno_vcf_idx
+    file "${sample_name}.ann.vcf.gz.*" into single_sample_anno_vcf_idx
     
     script:
     sample_name = vcf.baseName - '.hq.vcf'
@@ -720,12 +768,19 @@ process snpEff_for_sample {
         source /usr/bin/virtualenvwrapper.sh
         workon work_py3      
 
-        mv ${sample_name}.hq.vcf.gz ${sample_name}.hq.split.vcf.gz
+        mv raw_vcf/${sample_name}.raw.vcf.gz raw_vcf/${sample_name}.raw.split.vcf.gz
+        gunzip -c raw_vcf/${sample_name}.raw.split.vcf.gz > raw_vcf/${sample_name}.raw.split.vcf
+        sh ${script_dir}/catSplitChrVCF.sh \\
+            raw_vcf/${sample_name}.raw.split.vcf \\
+            ${sample_name}.raw.vcf 
 
-        python ${script_dir}/merge_wheat_vcf_chr.py \\
-            --vcf-file ${sample_name}.hq.split.vcf.gz \\
-            --split-chr-inf ${params.merge_chr_bed} \\
-            | bgzip > ${sample_name}.hq.vcf.gz
+        mv ${sample_name}.hq.vcf.gz ${sample_name}.hq.split.vcf.gz
+        mv ${sample_name}.hq.vcf.gz.tbi ${sample_name}.hq.split.vcf.gz.tbi
+
+        gunzip -c ${sample_name}.hq.split.vcf.gz > ${sample_name}.hq.split.vcf
+        sh ${script_dir}/catSplitChrVCF.sh \\
+            ${sample_name}.hq.split.vcf \\
+            ${sample_name}.hq.vcf         
 
         java -Xmx10g -jar ${params.snpEff}/snpEff.jar \\
             -c ${params.snpEff}/snpEff.config \\
@@ -735,7 +790,10 @@ process snpEff_for_sample {
             ${sample_name}.hq.vcf.gz \\
             | bgzip > ${sample_name}.ann.vcf.gz
 
-        tabix --csi vcf ${sample_name}.ann.vcf.gz        
+        tabix --csi ${sample_name}.ann.vcf.gz        
+
+        rm -r raw_vcf
+        rm *.vcf
         """
     else
         """
@@ -752,9 +810,9 @@ process snpEff_for_sample {
 }
 
 /*
-* SNP Table
+* SNP Table 2
 */
-process snp_table {
+process snp_inhouse_table {
 
     publishDir "${params.outdir}/vcf/all", mode: 'copy'
 
@@ -769,19 +827,10 @@ process snp_table {
     file refer_dict from genome_dict 
 
     output:
-    file "vcf.gatk.table.txt" into gatk_vcf_table
     file "vcf.table.txt" into om_vcf_table
 
     script:
-    """
-    java -jar /public/software/GATK/GATK.3.8/GenomeAnalysisTK.jar \\
-        -T VariantsToTable \\
-        -R ${refer} \\
-        -V ${vcf} \\
-        -F CHROM -F POS -F REF -F ALT \\
-        -GF AD -GF DP -GF GQ -GF PL \\
-        -o vcf.gatk.table.txt
-    
+    """   
     python ${script_dir}/extractTableFromsnpEff.py \\
         -v ${vcf}  \\
         -o vcf.table.txt
