@@ -754,7 +754,7 @@ process snpEff_for_sample {
     file "${sample_name}.raw.vcf.gz.*"
     file "${sample_name}.hq.vcf.gz"
     file "${sample_name}.hq.vcf.gz.*"
-    file "${sample_name}.hq.vcf.stat.csv"
+    file "${sample_name}.hq.vcf.stat.csv" into sample_vcf_stats
     file "${sample_name}.hq.vcf.stat.html"
     file "${sample_name}.ann.vcf.gz" into single_sample_anno_vcf
     file "${sample_name}.ann.vcf.gz.*" into single_sample_anno_vcf_idx
@@ -834,5 +834,57 @@ process snp_inhouse_table {
     python ${script_dir}/extractTableFromsnpEff.py \\
         -v ${vcf}  \\
         -o vcf.table.txt
+    """
+}
+
+
+/*
+* snp summary and plot
+*/
+process snp_summary {
+    publishDir "${params.outdir}/summary/", mode: 'copy'
+
+    when:
+    params.known_vcf && params.snpEff_db
+
+    input:
+    file 'fastp/*' from fastp_json.collect()
+    file 'snp_stats/*' from sample_vcf_stats.collect()
+    file 'alignment_stats/*' from reads_cov_results.collect()
+
+    output:
+    file "alignment/mapping.summary.csv"
+    file "snp/*csv"
+    file "plot"
+
+    script:
+    """
+    #!/bin/bash
+
+    source /usr/bin/virtualenvwrapper.sh
+    workon work_py3 
+
+    python ${script_dir}/reseq_mapping_stats.py \\
+        --mapping-stats-dir alignment_stats \\
+        --stats mapping \\
+        --out-dir alignment 
+
+
+    python ${script_dir}/reseq_mapping_stats.py \\
+        --mapping-stats-dir alignment_stats \\
+        --stats coverage \\
+        --out-dir alignment
+
+    python ${script_dir}/reseq_snpeff_summary.py \\
+        --snp-stats-dir snp_stats \\
+        --out-dir snp
+
+    /public/software/R/R-3.5.1/executable/bin/Rscript \\
+        ${script_dir}/reseq.R \\
+        --stats_dir . \\
+        --out_dir ./plot \\
+        --mapping \\
+        --genome_cov \\
+        --variant
     """
 }
