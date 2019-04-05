@@ -47,6 +47,9 @@ def extract_label_df(samtools_stats, label,
                           index_col=0, names=[
                               'Item', sample_id],
                           usecols=usecols, skiprows=skiprows)
+    # coverage > 1000 row name is 1000, duplicated index cause concat trouble
+    if label == 'COV':
+        sn_df = sn_df[sn_df.index < 1000]
     return sn_df
 
 
@@ -74,11 +77,14 @@ def mapping_stats_summary(mapping_stats_dir, stats, out_dir):
             file_i, stats_label, stats_usecols, stats_skiprows)
             for file_i in stats_i_files]
         stats_df = pd.concat(stats_df_list, axis=1)
+        stats_df.fillna(0, inplace=True)
         if len(stats_file) == 1:
             out_file = out_dir / f'{stats}.summary.txt'
         else:
             out_file = out_dir / f'{stats_i}.{stats}.summary.txt'
+        out_file2 = out_file.with_suffix('.csv')
         stats_df.to_csv(out_file, sep='\t')
+        stats_df.to_csv(out_file2)
 
 
 if __name__ == '__main__':

@@ -58,13 +58,13 @@ variant_flag <- argv$variant
 
 # mapping part
 if (mapping_flag) {
-  bwa_mapping_stats <- file.path(stats_dir, 'mapping',
+  bwa_mapping_stats <- file.path(stats_dir, 'alignment',
                                  'mapping.summary.txt')
   if (! file.exists(bwa_mapping_stats)) {
     stop('Mapping stats file not exists!')
   }
   
-  mapping_plot_prefix <- file.path(out_dir, 'mapping', 'Mapping_stats')
+  mapping_plot_prefix <- file.path(out_dir, 'alignment', 'Mapping_stats')
   om_bwa_mapping_plot(bwa_mapping_stats, BIG_SAMPLE_NUM, mapping_plot_prefix)  
 }
   
@@ -74,7 +74,7 @@ if (genome_cov_flag) {
   if (exome_flag) {
     cov_types <- cov_types[2:3]
   }
-  coverage_tables <- file.path(stats_dir, 'mapping',
+  coverage_tables <- file.path(stats_dir, 'alignment',
                                paste(cov_types, 'coverage.summary.txt', sep='.'))
   if (! all(file.exists(coverage_tables))) {
     stop('Coverage files missing!')
@@ -82,7 +82,7 @@ if (genome_cov_flag) {
   for (n in seq(length(cov_types))) {
     each_reg <- cov_types[n]
     each_table <- coverage_tables[n]
-    cov_plot_prefix <- file.path(out_dir, 'mapping', 
+    cov_plot_prefix <- file.path(out_dir, 'alignment', 
                                  paste('Reads_coverage', each_reg, sep = '_'))
     om_reads_cov_plot(each_table, BIG_SAMPLE_NUM, MAX_DEPTH, cov_plot_prefix)
   }

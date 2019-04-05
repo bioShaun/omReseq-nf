@@ -609,8 +609,6 @@ process snpEff_for_all {
             | bgzip > hq.ann.vcf.gz
         
         tabix --csi hq.ann.vcf.gz
-
-        rm *.vcf
         """
     else
         """
@@ -791,9 +789,6 @@ process snpEff_for_sample {
             | bgzip > ${sample_name}.ann.vcf.gz
 
         tabix --csi ${sample_name}.ann.vcf.gz        
-
-        rm -r raw_vcf
-        rm *.vcf
         """
     else
         """
@@ -853,9 +848,10 @@ process snp_summary {
     file 'alignment_stats/*' from reads_cov_results.collect()
 
     output:
-    file "alignment/mapping.summary.csv"
-    file "snp/*csv"
-    file "plot"
+    file "alignment/mapping.summary.csv" into mapping_table
+    file "snp/*csv" into snp_summary_table
+    file "reads_qc/*csv" into reads_qc_table
+    file "plot" into plot_dir
 
     script:
     """
@@ -863,6 +859,10 @@ process snp_summary {
 
     source /usr/bin/virtualenvwrapper.sh
     workon work_py3 
+
+    python ${script_dir}/extract_fastp_info.py \\
+        --fastp-dir fastp \\
+        --outdir reads_qc
 
     python ${script_dir}/reseq_mapping_stats.py \\
         --mapping-stats-dir alignment_stats \\

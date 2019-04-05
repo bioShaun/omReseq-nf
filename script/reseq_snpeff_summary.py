@@ -50,10 +50,7 @@ def extract_snpeff_stats(snpeff_stats_file, stats_name, suffix_pattern):
 
 def snp_stats_plot_and_show(snp_stats_dir, out_dir, suffix_pattern=".hq.vcf.stat.csv"):
     out_dir = Path(out_dir)
-    summary_dir = out_dir / 'summary'
-    plot_dir = out_dir / 'plot'
-    summary_dir.mkdir(parents=True, exist_ok=True)
-    plot_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     snpeff_files = glob.glob(f'{snp_stats_dir}/*{suffix_pattern}')
     for snp_stats_i in SNP_STATS:
         snp_stats_list = [extract_snpeff_stats(snpeff_file_i, snp_stats_i, suffix_pattern)
@@ -65,13 +62,13 @@ def snp_stats_plot_and_show(snp_stats_dir, out_dir, suffix_pattern=".hq.vcf.stat
         show_df.index.name = ''
         # TODO 0% for percent value
         show_df.fillna(0, inplace=True)
-        show_stats_file = summary_dir / f'{snp_stats_i}.summary.csv'
+        show_stats_file = out_dir / f'{snp_stats_i}.summary.csv'
         show_df.to_csv(show_stats_file)
 
         plot_df = snp_stats_df.unstack(level=0).loc[:, 'Count']
         plot_df.columns.name = ''
         plot_df.fillna(0, inplace=True)
-        plot_file = plot_dir / f'{snp_stats_i}.count.summary.txt'
+        plot_file = out_dir / f'{snp_stats_i}.count.summary.txt'
         plot_df.to_csv(plot_file, sep='\t')
 
 
