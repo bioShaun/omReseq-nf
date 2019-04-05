@@ -17,19 +17,23 @@ template = env.get_template('index.html')
 
 def table2dict(table_file, name, sep='\t'):
     table_dict = dict()
-    with open(table_file) as table_inf:
-        for n, eachline in enumerate(table_inf):
-            eachline_inf = eachline.split(sep)
-            if n == 0:
-                label = '{}_header'.format(name)
-                table_dict[label] = eachline_inf
-            else:
-                label = '{}_body'.format(name)
-                table_dict.setdefault(label, []).append(eachline_inf)
+    if table_file.exists():
+        with open(table_file) as table_inf:
+            for n, eachline in enumerate(table_inf):
+                eachline_inf = eachline.split(sep)
+                if n == 0:
+                    label = '{}_header'.format(name)
+                    table_dict[label] = eachline_inf
+                else:
+                    label = '{}_body'.format(name)
+                    table_dict.setdefault(label, []).append(eachline_inf)
+    if 'snp' in name:
+        table_dict['snp'] = True
     return table_dict
 
 
-def plot2report(plot_path, outpath, plot_name=None):
+def plot2report(plot_path, outpath, plot_flag, plot_name=None):
+    plot_dict = dict()
     plots = glob.glob(str(plot_path))
     outpath = PurePath(outpath)
     if plots:
@@ -39,8 +43,8 @@ def plot2report(plot_path, outpath, plot_name=None):
             plot_name = plot_path.stem
         outfile_path = outpath / f'{plot_name}{plot_path.suffix}'
         os.system(f'cp {plot_path} {outfile_path}')
-    else:
-        sys.exit(f'Can not find file: {plot_path}')
+        plot_dict[plot_flag] = True
+    return plot_dict
 
 
 def exom_report(result_dir, proj_name, report_dir=None):
@@ -49,38 +53,40 @@ def exom_report(result_dir, proj_name, report_dir=None):
         report_dir = result_dir / 'report'
     else:
         report_dir = Path(report_dir)
+    if report_dir.is_dir():
+        os.system(f'rm -r {report_dir}')
     display_dictionary = {}
     display_dictionary['project_name'] = proj_name
 
     # add fastqc table
-    qc_table = result_dir / 'stats/fastqc.summary.xls'
+    qc_table = result_dir / 'reads_qc/data.summary.csv'
     display_dictionary.update(
-        table2dict(qc_table, 'seq'))
+        table2dict(qc_table, 'seq', sep=','))
 
     # add aligment table
-    align_table = result_dir / 'stats/all_sample.mapping.xls'
+    align_table = result_dir / 'alignment/mapping.summary.csv'
     display_dictionary.update(
-        table2dict(align_table, 'align'))
+        table2dict(align_table, 'align', sep=','))
 
     # snp stats
     # summary
-    snp_summary_table = result_dir / 'stats/overall.varSummary.txt'
+    snp_summary_table = result_dir / 'snp/overall.varSummary.txt'
     display_dictionary.update(
         table2dict(snp_summary_table, 'snp_summary'))
 
-    snp_number_table = result_dir / 'stats/overall.varNum.txt'
+    snp_number_table = result_dir / 'snp/overall.varNum.txt'
     display_dictionary.update(
         table2dict(snp_number_table, 'snp_number'))
 
-    snp_impact_table = result_dir / 'stats/overall.varImpact.txt'
+    snp_impact_table = result_dir / 'snp/overall.varImpact.txt'
     display_dictionary.update(
         table2dict(snp_impact_table, 'snp_impact'))
 
-    snp_effect_table = result_dir / 'stats/overall.varEffects.txt'
+    snp_effect_table = result_dir / 'snp/overall.varEffects.txt'
     display_dictionary.update(
         table2dict(snp_effect_table, 'snp_effect'))
 
-    snp_region_table = result_dir / 'stats/overall.varRegion.txt'
+    snp_region_table = result_dir / 'snp/overall.varRegion.txt'
     display_dictionary.update(
         table2dict(snp_region_table, 'snp_region'))
 
@@ -90,53 +96,87 @@ def exom_report(result_dir, proj_name, report_dir=None):
         report_dir=report_dir
     ))
 
+    # plots
+    report_plot_path = report_dir / 'imgs'
+    mapping_plot = result_dir / 'plot/alignment/Mapping_stats.png'
+    display_dictionary.update(
+        plot2report(mapping_plot, report_plot_path, 'mapping_plot'))
+
+    # genome_cov_plot = result_dir / 'plot/alignment/Reads_coverage_genome.png'
+    # display_dictionary.update(
+    #     plot2report(genome_cov_plot, report_plot_path, 'genome_cov_plot')
+    # )
+    
+    # cds_cov_plot = result_dir / 'plot/alignment/Reads_coverage_cds.png'
+    # display_dictionary.update(
+    #     plot2report(cds_cov_plot, report_plot_path, 'cds_cov_plot')
+    # )
+    
+    variant_summary_plot = result_dir / \
+        'plot/variants/Variant_stats_summary.png'
+    if variant_summary_plot.exists():
+        display_dictionary.update(
+            plot2report(variant_summary_plot, report_plot_path, 'variant_summary')
+        )
+        variant_summary_plot_dir = result_dir / 'plot/variants/'
+        for dir_i in variant_summary_plot_dir.iterdir():
+            if dir_i.is_dir():
+                example_sample = dir_i.name
+        varType_plot = result_dir / \
+            f'plot/variants/{example_sample}/{example_sample}_varType.png'
+        display_dictionary.update(
+            plot2report(varType_plot, report_plot_path, 
+            'variant_type', 'varType'))
+
+        varRegion_plot = result_dir / \
+            f'plot/variants/{example_sample}/{example_sample}_varRegion.png'
+        display_dictionary.update(
+            plot2report(varRegion_plot, report_plot_path, 
+            'variant_region', 'varRegion'))
+
+        varEffects_high_plot = result_dir / \
+            f'plot/variants/{example_sample}/{example_sample}_varEffects-HIGH.png'
+        display_dictionary.update(
+            plot2report(varEffects_high_plot, report_plot_path,
+            'variant_effect_high', 'varEffects-HIGH'))
+
+        varEffects_moderate_plot = result_dir / \
+            f'plot/variants/{example_sample}/{example_sample}_varEffects-MODERATE.png'
+        display_dictionary.update(
+            plot2report(varEffects_moderate_plot,
+                        report_plot_path, 
+                        'variant_effect_moderate', 'varEffects-MODERATE'))
+
+        varEffects_low_plot = result_dir / \
+            f'plot/variants/{example_sample}/{example_sample}_varEffects-LOW.png'
+        display_dictionary.update(
+            plot2report(varEffects_low_plot, report_plot_path, 
+            'variant_effect_low', 'varEffects-LOW'))
+
+        varEffects_modifier_plot = result_dir / \
+            f'plot/variants/{example_sample}/{example_sample}_varEffects-MODIFIER.png'
+        display_dictionary.update(
+            plot2report(varEffects_modifier_plot,
+                    report_plot_path, 
+                    'variant_effect_modifier' ,'varEffects-MODIFIER'))
+        varImpact_plot = result_dir / \
+            f'plot/variants/{example_sample}/{example_sample}_varImpact.png'
+        display_dictionary.update(plot2report(varImpact_plot,
+                    report_plot_path, 'variant_impact', 'varImpact'))
+
+    # deltaSNP_plot = result_dir / 'mapping/*deltaSNP.png'
+    # Gprime_plot = result_dir / 'mapping/*Gprime.png'
+    # negLog10Pval_plot = result_dir / 'mapping/*negLog10Pval.png'
+    # plot2report(deltaSNP_plot, report_plot_path, 'deltaSNP')
+    # plot2report(Gprime_plot, report_plot_path, 'Gprime')
+    # plot2report(negLog10Pval_plot, report_plot_path, 'negLog10Pval')
+
+    display_dictionary.update({'pca': True, 'snp_index': True})
     display_html = template.render(display_dictionary)
     report_html = report_dir / 'index.html'
     with open(report_html, 'w') as out_inf:
         out_inf.write(display_html)
-
-    # plots
-    report_plot_path = report_dir / 'imgs'
-    mapping_plot = result_dir / 'stats/plot/mapping/Mapping_stats.png'
-    plot2report(mapping_plot, report_plot_path)
-
-    genome_cov_plot = result_dir / 'stats/plot/coverage/Reads_coverage_genome.png'
-    plot2report(genome_cov_plot, report_plot_path)
-    cds_cov_plot = result_dir / 'stats/plot/coverage/Reads_coverage_cds.png'
-    plot2report(cds_cov_plot, report_plot_path)
-
-    variant_summary_plot = result_dir / \
-        'stats/plot/variants/Variant_stats_summary.png'
-    plot2report(variant_summary_plot, report_plot_path)
-
-    varType_plot = result_dir / 'stats/plot/variants/*varType.png'
-    plot2report(varType_plot, report_plot_path, 'varType')
-    varRegion_plot = result_dir / 'stats/plot/variants/*varRegion.png'
-    plot2report(varRegion_plot, report_plot_path, 'varRegion')
-    varEffects_high_plot = result_dir / 'stats/plot/variants/*varEffects-HIGH.png'
-    plot2report(varEffects_high_plot, report_plot_path, 'varEffects-HIGH')
-    varEffects_moderate_plot = result_dir / \
-        'stats/plot/variants/*varEffects-MODERATE.png'
-    plot2report(varEffects_moderate_plot,
-                report_plot_path, 'varEffects-MODERATE')
-    varEffects_low_plot = result_dir / 'stats/plot/variants/*varEffects-LOW.png'
-    plot2report(varEffects_low_plot, report_plot_path, 'varEffects-LOW')
-    varEffects_modifier_plot = result_dir / \
-        'stats/plot/variants/*varEffects-MODIFIER.png'
-    plot2report(varEffects_modifier_plot,
-                report_plot_path, 'varEffects-MODIFIER')
-    varImpact_plot = result_dir / \
-        'stats/plot/variants/*varImpact.png'
-    plot2report(varImpact_plot,
-                report_plot_path, 'varImpact')
-
-    deltaSNP_plot = result_dir / 'mapping/*deltaSNP.png'
-    Gprime_plot = result_dir / 'mapping/*Gprime.png'
-    negLog10Pval_plot = result_dir / 'mapping/*negLog10Pval.png'
-    plot2report(deltaSNP_plot, report_plot_path, 'deltaSNP')
-    plot2report(Gprime_plot, report_plot_path, 'Gprime')
-    plot2report(negLog10Pval_plot, report_plot_path, 'negLog10Pval')
-
+    os.system(f'tar -zcf {report_dir}.tar.gz {report_dir}')
 
 if __name__ == '__main__':
     fire.Fire(exom_report)
