@@ -6,8 +6,11 @@ def helpMessage() {
     Usage:
 
     References If not specified in the configuration file or you wish to overwrite any of the references.
-      --fasta                       Path to Fasta reference
+      --fasta                       Path to reference fasta
+      --gtf                         Path to reference gtf
       --bwa_index                   Path to reference bwa index
+      --star_index                  Path to reference star index
+      --hisat_index                 Path to reference hisat index
       --exon_bed                    Path to reference exon bed file
       --cds_bed                     Path to reference cds bed file
       --padded_bed                  Path to reference pedded bed file
@@ -22,8 +25,9 @@ def helpMessage() {
       --snpEff_db                   snpEff database name
       --quality                     GATK reads quality threshold
       --depth                       GATK reads depth threshold
-      --exome                       Is the project a exom sequencing project
+      --data_type                   reseq, exome or rnaseq data
       --merge_chr_bed               bedfile to guide merge split chr information
+      --aligner                     rnaseq mapping software star or hisat
 
     """.stripIndent()
 }
@@ -42,10 +46,25 @@ if (params.help){
     exit 0
 }
 
+
+def check_ref_exist = {file_path, file_type ->
+    if (file_path) {
+        file_path = file(file_path)
+        if( !file_path.exists() ) exit 1, "${file_type} file not found: ${file_path}"
+        return file_path
+    } else {
+        exit 1, "No reference genome ${file_type} specified!"
+    }
+}
+
 // default parameters
 params.skip_qc = false
 params.fasta = false
+params.gtf = false
+params.aligner = 'hisat'
 params.bwa_index = false
+params.hisat_index = false
+params.star_index = false
 params.reads = false
 params.cds_bed = false
 params.exon_bed = false
@@ -56,17 +75,17 @@ params.quality = 30
 params.depth = 5
 params.snpEff = '/public/software/snpEff/snpEffv4.3T/'
 params.snpEff_db = false
-params.exome = false
+params.data_type = 'exome'
 params.merge_chr_bed = false
 
 // reference files
 cds_bed_file = file(params.cds_bed)
 exon_bed_file = file(params.exon_bed)
-bwa_index_file = file(params.bwa_index)
 genome_fa = file(params.fasta)
 genome_path = genome_fa.getParent()
 genome_fai = file("${params.fasta}.fai")
 genome_dict = file("${genome_path}/${genome_fa.baseName}.dict")
+
 if (params.known_vcf) {
     known_vcf = file(params.known_vcf)
     known_vcf_index = file("${params.known_vcf}.tbi")
@@ -75,7 +94,7 @@ if (params.known_vcf) {
     known_vcf_index = false
 }
 
-if (params.exome) {
+if (params.data_type == 'exome') {
     if (params.padded_bed) {
         split_bed_dir  = "${params.split_bed}/padded"
     } else {
@@ -91,6 +110,18 @@ if (params.padded_bed) {
 } else {
     padded_bed_file = exon_bed_file
 }
+
+// hisat index
+if (params.hisat_index) {
+    gtf = check_ref_exist(params.gtf, 'gtf file')
+    hisat_index = Channel
+                        .fromPath("${params.hisat_index}/*.ht2*")
+                        .ifEmpty { exit 1, "HISAT2 index not found: ${params.hisat_index}" }
+
+    alignment_splicesites = file("${params.hisat_index}/${gtf.baseName}.hisat2_splice_sites.txt")
+}
+
+
 
 // prepare split bed files
 Channel
@@ -140,38 +171,114 @@ process fastp {
 }  
 
 /*
-* BWA Mapping
+* Mapping
 */
-process bwa_mapping {
-    tag "${sample_name}"
+if (params.data_type == 'rnaseq') {
 
-    publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
+    if (params.aligner == 'star') {
+        star_index_file = check_ref_exist(params.star_index, 'STAR index')
+        process star_mapping {
+            tag "${sample_name}"
+            publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
 
-    input:
-    file reads from trimmed_reads
-    file bwa_index_file from bwa_index_file
-    file genome_fa from genome_fa
+            input:
+            file reads from trimmed_reads
+            file star_index_file from star_index_file
 
-    output: 
-    file "${sample_name}.bam" into unsort_bam
+            output:
+            file "${sample_name}.Aligned.out.bam" into unsort_bam
 
-    cpus = 40
+            cpus = 80
 
-    script:
-    sample_name = reads[0].toString() - '.trimmed.R1.fq.gz'
-    """
-    bwa mem -M -a \\
-	    -R \"@RG\\tID:${sample_name}\\tSM:${sample_name}\\tLB:${sample_name}\\tPI:350\\tPL:Illumina\\tCN:TCuni\" \\
-	    -t ${task.cpus} \\
-	    -K 10000000 \\
-	    ${bwa_index_file}/${genome_fa.getName()} \\
-	    ${reads[0]} \\
-	    ${reads[1]} \\
-	    | \\
-	samtools view -O bam \\
-	    --threads ${task.cpus} \\
-	    -o ${sample_name}.bam
-    """
+            script:
+            sample_name = reads[0].toString() - '.trimmed.R1.fq.gz'
+
+            """
+            STAR \\
+                --genomeDir ${star_index_file} \\
+                --readFilesIn ${reads}  \\
+                --runThreadN 16 \\
+                --twopassMode Basic \\
+                --outSAMtype BAM Unsorted  \\
+                --readFilesCommand zcat \\
+                --outFileNamePrefix ${sample_name}.
+            """
+
+        }
+    } else {
+        process hisat_mapping {
+            tag "${sample_name}"
+
+            publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
+
+            input:
+            file reads from trimmed_reads
+            file index from hisat_index.collect()
+            
+            output:
+            file "${sample_name}.bam" into unsort_bam
+
+            cpus = 20
+            
+            script:
+            sample_name = reads[0].toString() - '.trimmed.R1.fq.gz'
+            index_base = index[0].toString() - ~/.\d.ht2l?/
+            """
+            hisat2 -x ${index_base} \\
+                    -1 ${reads[0]} \\
+                    -2 ${reads[1]} \\
+                    --known-splicesite-infile ${alignment_splicesites} \\
+                    --no-mixed \\
+                    --no-discordant \\
+                    -p ${task.cpus} \\
+                    --met-stderr \\
+                    --new-summary \\
+                    --summary-file ${sample_name}.hisat2_summary.txt \\
+                    --rg-id ${sample_name} \\
+                    --rg SM:${sample_name}\\
+                    --rg LB:${sample_name} \\
+                    --rg PI:350 \\
+                    --rg PL:Illumina \\
+                    --rg CN:TCuni \\
+                    | samtools view -bS -F 4 -F 8 -F 256 - > ${sample_name}.bam           
+            """
+        }
+    }
+
+
+} else {
+    bwa_index_file = check_ref_exist(params.bwa_index, 'bwa index')
+    process bwa_mapping {
+        tag "${sample_name}"
+
+        publishDir "${params.outdir}/alignment/${sample_name}", mode: 'copy'
+
+        input:
+        file reads from trimmed_reads
+        file bwa_index_file from bwa_index_file
+        file genome_fa from genome_fa
+
+        output: 
+        file "${sample_name}.bam" into unsort_bam
+
+        cpus = 40
+
+        script:
+        sample_name = reads[0].toString() - '.trimmed.R1.fq.gz'
+        """
+        bwa mem -M -a \\
+            -R \"@RG\\tID:${sample_name}\\tSM:${sample_name}\\tLB:${sample_name}\\tPI:350\\tPL:Illumina\\tCN:TCuni\" \\
+            -t ${task.cpus} \\
+            -K 10000000 \\
+            ${bwa_index_file}/${genome_fa.getName()} \\
+            ${reads[0]} \\
+            ${reads[1]} \\
+            | \\
+        samtools view -O bam \\
+            --threads ${task.cpus} \\
+            -o ${sample_name}.bam
+        """
+    }
 }
 
 
@@ -260,18 +367,59 @@ process bam_remove_duplicate {
   
     output:
     file "${sample_name}.rmdup.bam" into br_rmdup_bam
+    file "${sample_name}.rmdup.bai" into br_rmdup_bam_idx
   
     cpus = 8
 
     script:
     sample_name = bam.baseName - '.sort'
     """
-    samtools markdup -r -s \\
+    samtools markdup -r \\
 	    --threads ${task.cpus} \\
 	    ${bam} \\
 	    ${sample_name}.rmdup.bam
+
+    samtools index ${sample_name}.rmdup.bam ${sample_name}.rmdup.bai -@ 8
     """
 }
+
+/*
+* Split N
+*/
+
+process SplitNCigarReads {
+
+    tag "${sample_name}"
+        
+    input:
+    file bam from br_rmdup_bam
+    file fasta from genome_fa
+    file fa_dict from genome_dict
+    file fai_idx from genome_fai
+    
+    output:
+    file "${sample_name}.SplitN.bam" into splitn_bam
+
+    cpus = 8
+    
+    script:
+    sample_name = bam.baseName - '.rmdup'
+
+    if (params.data_type == 'rnaseq')
+
+        """
+        gatk SplitNCigarReads \\
+            --reference ${fasta} \\
+            --input ${bam} \\
+            --output ${sample_name}.SplitN.bam \\
+            --max-reads-in-memory 1000000  \\
+        """
+    else
+        """
+        ln -s ${bam} ${sample_name}.SplitN.bam
+        """
+} 
+
 
 
 /*
@@ -286,7 +434,7 @@ process bam_BaseRecalibrator {
     params.known_vcf    
 
     input:
-    file bam from br_rmdup_bam
+    file bam from splitn_bam
     file refer from genome_fa
     file refer_fai from genome_fai
     file refer_dict from genome_dict
@@ -300,11 +448,11 @@ process bam_BaseRecalibrator {
     cpus = 8
 
     script:
-    sample_name = bam.baseName - '.rmdup'
+    sample_name = bam.baseName - '.SplitN'
     """
     gatk BaseRecalibrator \\
         --reference ${refer} \\
-        --input ${sample_name}.rmdup.bam \\
+        --input ${bam} \\
         --output ${sample_name}.recal.table \\
         --known-sites ${known_vcf}
     """
@@ -330,11 +478,12 @@ process bam_ApplyBQSR {
   
     output:
     file "${sample_name}.bqsr.bam" into bqsr_bam, sample_bam
+    file "${sample_name}.bqsr.bai" into bqsr_bam_idx
   
     cpus = 8
 
     script:
-    sample_name = bam.baseName - '.rmdup'
+    sample_name = bam.baseName - '.SplitN'
     """       
     gatk ApplyBQSR \\
         --bqsr-recal-file ${recal_table_file} \\
@@ -345,6 +494,7 @@ process bam_ApplyBQSR {
         --read-filter NonZeroReferenceLengthAlignmentReadFilter \\
         --read-filter ProperlyPairedReadFilter \\
         --minimum-mapping-quality 30 
+
     """
 }
 
@@ -685,7 +835,7 @@ process gatk_GenotypeGVCFs_by_sample {
     
     script:
     sample_name = gvcf.baseName - '.g.vcf'
-    if (params.exome)
+    if (params.data_type == 'exome')
         """
         gatk GenotypeGVCFs \\
             --reference ${refer} \\
